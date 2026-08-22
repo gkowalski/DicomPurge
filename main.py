@@ -1,4 +1,4 @@
-"""Entry point for the DICOM de-identification tool."""
+"""Entry point for Scuppernong, the DICOM de-identification tool."""
 from __future__ import annotations
 
 import logging
@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from deid_app.logging_setup import configure_logging
 from deid_app.main_window import MainWindow
+from deid_app.resources import app_icon
 
 
 def _install_excepthook() -> None:
@@ -34,8 +35,9 @@ def _install_excepthook() -> None:
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("DICOM De-identification")
+    app.setApplicationName("Scuppernong")
     app.setOrganizationName("de-id")
+    app.setWindowIcon(app_icon())
 
     bridge = configure_logging()
     _install_excepthook()

@@ -42,6 +42,14 @@ def main():
     win = MainWindow(bridge)
     win.show()
 
+    # Toolbar logo
+    from deid_app.resources import LOGO_PATH
+    check(LOGO_PATH.is_file(), f"logo present at {LOGO_PATH}")
+    pm = win.logo_label.pixmap()
+    check(pm is not None and not pm.isNull(), "logo pixmap loaded into the top toolbar")
+    check(pm.height() == 36, f"logo scaled to 36px high (got {pm.height() if pm else '-'})")
+    check(not win.windowIcon().isNull(), "window icon set from the logo")
+
     win._start_scan(IN)
     for _ in range(40):
         pump(100)

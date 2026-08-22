@@ -1,6 +1,8 @@
-# DICOM De-identification (PySide6)
-## "[Scuppernog](https://en.wikipedia.org/wiki/Scuppernong_River_(Wisconsin))  "
-Interactive tool for blacking out burned-in identifiers in DICOM images. You draw
+# Scuppernong
+
+Named after the Scuppernong River in Wisconsin.
+
+A PySide6 tool for de-identifying burned-in annotations in DICOM images. You draw
 boxes on one image of a series, the boxes apply to every image in that series, and
 the export mirrors the input directory structure into an output directory.
 
@@ -25,6 +27,8 @@ uv venv --python 3.12 && uv sync
 | File | Purpose |
 | --- | --- |
 | `main.py` | Entry point; installs the logging bridge and a global exception hook |
+| `deid_app/resources.py` | Bundled images — the toolbar logo and window icon |
+| `images/` | `Scuppernong_logo_512x512.png`, shown top-left and used as the window icon |
 | `deid_app/logging_setup.py` | Root logging config: `~/de-id.log` (rotating) + Qt signal bridge |
 | `deid_app/log_pane.py` | Log tab: level filter, colouring, auto-scroll, clear button |
 | `deid_app/model.py` | Recursive `*.dcm` scan (worker thread) and the `Series` model |

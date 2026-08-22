@@ -31,6 +31,7 @@ from .image_view import ImageCanvas
 from .log_pane import LogPane
 from .logging_setup import LogBridge
 from .model import Series, start_scan
+from .resources import LOGO_PATH, app_icon, logo_pixmap
 from .render import dataset_to_qimage, frame_count, read_dataset
 
 log = logging.getLogger(__name__)
@@ -66,7 +67,8 @@ def _status_icon(status: str) -> QIcon:
 class MainWindow(QMainWindow):
     def __init__(self, bridge: LogBridge) -> None:
         super().__init__()
-        self.setWindowTitle("DICOM De-identification")
+        self.setWindowTitle("Scuppernong - DICOM De-identification")
+        self.setWindowIcon(app_icon())
         self.resize(1400, 880)
 
         self.settings = QSettings("de-id", "dicom-deid")
@@ -97,6 +99,15 @@ class MainWindow(QMainWindow):
 
         # Top bar -------------------------------------------------------
         top = QHBoxLayout()
+
+        self.logo_label = QLabel()
+        pixmap = logo_pixmap(36)
+        if pixmap is not None:
+            self.logo_label.setPixmap(pixmap)
+            self.logo_label.setToolTip(str(LOGO_PATH.name))
+        self.logo_label.setContentsMargins(2, 0, 8, 0)
+        top.addWidget(self.logo_label, 0, Qt.AlignVCenter)
+
         top.addWidget(QLabel("Input directory:"))
         self.dir_combo = QComboBox()
         self.dir_combo.setMinimumWidth(520)
@@ -128,7 +139,8 @@ class MainWindow(QMainWindow):
             "Grey = not reviewed, blue = reviewed, red = boxes not committed, "
             "green = committed.\nRight-click a series for status actions."
         )
-        self.tree.setColumnWidth(0, 380)
+        self.tree.setColumnWidth(0, 300)
+        self.tree.setColumnWidth(1, 175)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)

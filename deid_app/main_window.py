@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, Slot
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QMenu,
@@ -163,6 +163,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(splitter, 1)
 
         self.setCentralWidget(central)
+        self._build_shortcuts()
 
         status = QStatusBar()
         self.progress = QProgressBar()
@@ -171,6 +172,20 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(self.progress)
         self.setStatusBar(status)
         status.showMessage("Idle")
+
+    def _build_shortcuts(self) -> None:
+        """Cmd+S (Ctrl+S off macOS) commits the series being reviewed."""
+        self.commit_action = QAction("Commit series", self)
+        self.commit_action.setShortcut(QKeySequence.StandardKey.Save)
+        self.commit_action.setShortcutContext(Qt.WindowShortcut)
+        self.commit_action.triggered.connect(self.commit_series)
+        self.addAction(self.commit_action)
+
+        shortcut = self.commit_action.shortcut().toString(QKeySequence.NativeText)
+        self.commit_button.setText(f"Commit series ({shortcut})")
+        self.commit_button.setToolTip(
+            self.commit_button.toolTip() + f"\n\nShortcut: {shortcut}"
+        )
 
     def _build_image_tab(self) -> QWidget:
         page = QWidget()
@@ -654,8 +669,23 @@ class MainWindow(QMainWindow):
         self._update_export_button()
 
     def commit_series(self) -> None:
-        if self.current_series is not None:
-            self._commit(self.current_series)
+        """Commit the displayed series. Also the Cmd+S / Ctrl+S handler."""
+        series = self.current_series
+        if series is None:
+            self.statusBar().showMessage(
+                "Nothing to commit - select a series in the tree first", 4000
+            )
+            log.debug("Commit requested with no series selected")
+            return
+        if series.committed:
+            self.statusBar().showMessage(
+                f"{series.label()} is already committed", 4000
+            )
+            return
+        self._commit(series)
+        self.statusBar().showMessage(
+            f"Committed {series.label()} ({len(series.boxes)} box(es))", 5000
+        )
 
     def _commit(self, series: Series) -> None:
         series.reviewed = True

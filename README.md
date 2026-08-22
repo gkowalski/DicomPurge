@@ -38,7 +38,7 @@ uv venv --python 3.12 && uv sync
 | `deid_app/redaction.py` | The de-identification itself — pixel data and overlays |
 | `deid_app/export.py` | Export worker: mirrors the input tree into the output tree |
 | `deid_app/main_window.py` | Window assembly, tree, tabs, wiring |
-| `tests/` | Fixture generator and three headless test scripts |
+| `tests/` | Fixture generator and four headless test scripts |
 
 ## Workflow
 
@@ -66,7 +66,10 @@ uv venv --python 3.12 && uv sync
    releasing there discards it.
 6. Selecting a series **automatically marks it "reviewed"** — the assumption is that you
    looked at the images. Placing a box moves it to **pending** (red), and **Commit series**
-   moves it to **committed** (green).
+   moves it to **committed** (green). **⌘S** (Ctrl+S off macOS) commits the series being
+   reviewed without reaching for the button — it works from any tab, is a no-op with a
+   status-bar note if nothing is selected or the series is already committed, and the
+   status bar confirms each commit.
 7. **Reset boxes** drops every box on the series; it falls back to *reviewed*, since you
    have still seen the images. Adding a new box to a committed series re-opens it as
    pending.

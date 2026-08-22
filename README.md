@@ -1,6 +1,6 @@
-# Scuppernong
+# Scuppernong - DICOM De-id
 
-Named after the Scuppernong River in Wisconsin.
+[Named after the Scuppernong River in Wisconsin.](https://en.wikipedia.org/wiki/Scuppernong_River_(Wisconsin))
 
 A PySide6 tool for de-identifying burned-in annotations in DICOM images. You draw
 boxes on one image of a series, the boxes apply to every image in that series, and

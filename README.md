@@ -6,6 +6,10 @@ A PySide6 tool for de-identifying burned-in annotations in DICOM images. You dra
 boxes on one image of a series, the boxes apply to every image in that series, and
 the export mirrors the input directory structure into an output directory.
 
+## Screenshot 
+
+![Screenshot](images/screenshot.png)
+
 ## Running
 
 The project uses [uv](https://docs.astral.sh/uv/):

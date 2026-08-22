@@ -1,0 +1,111 @@
+# DICOM De-identification (PySide6)
+
+Interactive tool for blacking out burned-in identifiers in DICOM images. You draw
+boxes on one image of a series, the boxes apply to every image in that series, and
+the export mirrors the input directory structure into an output directory.
+
+## Running
+
+The project uses [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv sync
+uv run python main.py
+```
+
+All dependencies publish wheels for CPython 3.11–3.14. If a wheel is ever missing for
+your interpreter, pin the venv to an older Python and re-sync:
+
+```bash
+uv venv --python 3.12 && uv sync
+```
+
+## Layout
+
+| File | Purpose |
+| --- | --- |
+| `main.py` | Entry point; installs the logging bridge and a global exception hook |
+| `deid_app/logging_setup.py` | Root logging config: `~/de-id.log` (rotating) + Qt signal bridge |
+| `deid_app/log_pane.py` | Log tab: level filter, colouring, auto-scroll, clear button |
+| `deid_app/model.py` | Recursive `*.dcm` scan (worker thread) and the `Series` model |
+| `deid_app/render.py` | DICOM instance → `QImage` (modality LUT, VOI LUT, MONOCHROME1 inversion) |
+| `deid_app/image_view.py` | Image canvas and rubber-band box selection |
+| `deid_app/redaction.py` | The de-identification itself — pixel data and overlays |
+| `deid_app/export.py` | Export worker: mirrors the input tree into the output tree |
+| `deid_app/main_window.py` | Window assembly, tree, tabs, wiring |
+| `tests/` | Fixture generator and two headless test scripts |
+
+## Workflow
+
+1. **Pick an input directory** from the drop-down at the top (it remembers recent
+   directories) or via **Browse…**. Nothing happens until you do.
+2. The tree fills with `Patient → Study → Series`. Only **series** nodes are selectable;
+   patient and study nodes are display-only.
+3. Selecting a series renders its first image in the **Image review** tab. The slider at
+   the bottom cycles through every image in the series (multi-frame instances contribute
+   one slider position per frame).
+4. **Drag on the image** to place a redaction box. While dragging, releasing inside the
+   image keeps the box; dragging outside the image turns the selection **red** and
+   releasing there discards it.
+5. Selecting a series **automatically marks it "reviewed"** — the assumption is that you
+   looked at the images. Placing a box moves it to **pending** (red), and **Commit series**
+   moves it to **committed** (green).
+6. **Reset boxes** drops every box on the series; it falls back to *reviewed*, since you
+   have still seen the images. Adding a new box to a committed series re-opens it as
+   pending.
+7. **Right-click a series** for a popup menu: *Set status to Clean* (clears reviewed and
+   committed, and discards any boxes after a confirmation), *Commit series*, *Reset boxes*.
+   Setting the currently displayed series to Clean also deselects it, so clicking it again
+   re-marks it reviewed.
+8. **Export** requires every series to be **reviewed or committed**. A series carrying
+   uncommitted boxes (*pending*) blocks the export until you commit it; a *clean* series
+   blocks it until you look at it. Export then prompts for an output directory and writes
+   each file to the same relative path underneath it.
+
+### Series status
+
+| Indicator | Status | Meaning | Export? |
+| --- | --- | --- | --- |
+| Grey | `clean` | never selected, or reset via the right-click menu | blocked |
+| Blue | `reviewed` | you selected the series and saw the images | allowed |
+| Red | `pending` | boxes placed but not committed | blocked |
+| Green | `committed` | boxes locked in | allowed |
+
+Everything — selections, commits, per-file results, and exceptions — is logged to the
+**Log** tab and to `~/de-id.log`.
+
+## How the redaction works
+
+For every file in a series with boxes:
+
+- **`(7FE0,0010)` Pixel Data** — decoded to an array, and each box region set to the
+  value that renders black (0, or the max stored value for `MONOCHROME1`). Applied to
+  every frame of multi-frame instances.
+- **`(60xx,3000)` Overlay Data** — every overlay group in `6000`–`601E` is unpacked
+  bit-by-bit, the box regions are zeroed, and the plane is repacked. Box coordinates are
+  mapped onto the overlay grid using `(60xx,0050)` Overlay Origin, so overlays smaller
+  than the image or offset from it are handled correctly. Multi-frame overlays
+  (`(60xx,0015)`) are handled too. Overlays are redacted even though only `(7FE0,0010)` is
+  shown in the UI.
+- **Compressed input (JPEG etc.)** — the frame cannot be edited in place, so the file is
+  decoded and rewritten as Explicit VR Little Endian. `YBR_*` data is normalised to `RGB`
+  (so that 0,0,0 really is black) and `PhotometricInterpretation` / `PlanarConfiguration`
+  are updated to match. This is logged per file.
+- `(0028,0301) BurnedInAnnotation` is set to `NO` on redacted files.
+
+Series with no boxes are copied through byte-for-byte.
+
+Boxes are stored as fractions of the image (0–1), not screen pixels, so they are immune
+to window resizing and to instances within a series having different dimensions.
+
+**Scope note:** this tool redacts *pixels and overlays*. It does not scrub identifying
+DICOM metadata (patient name, IDs, dates, UIDs, private tags) — pair it with a tag-level
+de-identification step if you need PS3.15 Annex E conformance.
+
+## Tests
+
+```bash
+uv run python tests/make_fixtures.py /tmp/fixtures   # synthetic mono / RGB multiframe / JPEG + overlays
+uv run python tests/test_redaction.py                # verifies pixels + overlay bits are zeroed
+QT_QPA_PLATFORM=offscreen uv run python tests/test_gui_smoke.py
+```

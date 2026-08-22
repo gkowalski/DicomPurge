@@ -1,5 +1,5 @@
 # DICOM De-identification (PySide6)
-
+## "[Scuppernog](https://en.wikipedia.org/wiki/Scuppernong_River_(Wisconsin))  "
 Interactive tool for blacking out burned-in identifiers in DICOM images. You draw
 boxes on one image of a series, the boxes apply to every image in that series, and
 the export mirrors the input directory structure into an output directory.

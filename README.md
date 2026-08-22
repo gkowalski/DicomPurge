@@ -129,3 +129,6 @@ uv run python tests/make_fixtures.py /tmp/fixtures   # synthetic mono / RGB mult
 uv run python tests/test_redaction.py                # verifies pixels + overlay bits are zeroed
 QT_QPA_PLATFORM=offscreen uv run python tests/test_gui_smoke.py
 ```
+## Credits
+- Developed by the **CTSI of SE WI**
+- If you utilize CTSI resources, please cite the **NIH CTSA; 2UL1TR001436, 2TL1TR001437, 2KL2TR001438** and acknowledge support.

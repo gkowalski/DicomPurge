@@ -30,6 +30,7 @@ from .export import start_export
 from .image_view import ImageCanvas
 from .log_pane import LogPane
 from .logging_setup import LogBridge
+from .metadata_pane import MetadataPane
 from .model import Series, start_scan
 from .resources import LOGO_PATH, app_icon, logo_pixmap
 from .render import dataset_to_qimage, frame_count, read_dataset
@@ -81,6 +82,8 @@ class MainWindow(QMainWindow):
         self._frames: list[tuple[int, int]] = []
         self._cache_path: Path | None = None
         self._cache_ds = None
+        # Path whose tags the Metadata tab is currently showing.
+        self._metadata_path: Path | None = None
 
         self._scan_thread = None
         self._scan_worker = None
@@ -148,6 +151,8 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_image_tab(), "Image review")
+        self.metadata_pane = MetadataPane()
+        self.tabs.addTab(self.metadata_pane, "Metadata")
         self.log_pane = LogPane(bridge)
         self.tabs.addTab(self.log_pane, "Log")
         splitter.addWidget(self.tabs)
@@ -339,7 +344,9 @@ class MainWindow(QMainWindow):
         self._frames = []
         self._cache_path = None
         self._cache_ds = None
+        self._metadata_path = None
         self.tree.clear()
+        self.metadata_pane.clear()
         self.canvas.set_image(None)
         self.canvas.set_boxes([])
         self.canvas.set_editable(False)
@@ -480,6 +487,8 @@ class MainWindow(QMainWindow):
         """Return the review tab to its empty state without touching the model."""
         self.current_series = None
         self._frames = []
+        self._metadata_path = None
+        self.metadata_pane.clear()
         self.canvas.set_image(None)
         self.canvas.set_boxes([])
         self.canvas.set_editable(False)
@@ -555,6 +564,7 @@ class MainWindow(QMainWindow):
         instance = series.instances[instance_index]
         try:
             ds = self._dataset_for(instance.path)
+            self._show_metadata(series, instance, ds)
             image = dataset_to_qimage(ds, frame_index)
             self.canvas.set_image(image)
         except Exception as exc:  # noqa: BLE001
@@ -570,6 +580,18 @@ class MainWindow(QMainWindow):
             f"{series.patient_name} - {series.label()}   |   {instance.path.name}"
             + (f"  (frame {frame_index + 1})" if frame_count_safe(self._cache_ds) > 1 else "")
         )
+
+    def _show_metadata(self, series: Series, instance, ds) -> None:
+        """Refresh the Metadata tab, but only when the instance actually changed."""
+        if self._metadata_path == instance.path:
+            return
+        self._metadata_path = instance.path
+        try:
+            self.metadata_pane.show_dataset(
+                ds, f"{series.label()}   |   {instance.path.name}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Could not show metadata for %s: %s", instance.path, exc)
 
     @Slot(int)
     def _on_slider_changed(self, value: int) -> None:

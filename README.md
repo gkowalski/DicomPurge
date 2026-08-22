@@ -31,13 +31,14 @@ uv venv --python 3.12 && uv sync
 | `images/` | `Scuppernong_logo_512x512.png`, shown top-left and used as the window icon |
 | `deid_app/logging_setup.py` | Root logging config: `~/de-id.log` (rotating) + Qt signal bridge |
 | `deid_app/log_pane.py` | Log tab: level filter, colouring, auto-scroll, clear button |
+| `deid_app/metadata_pane.py` | Metadata tab: read-only DICOM tag tree for the displayed instance |
 | `deid_app/model.py` | Recursive `*.dcm` scan (worker thread) and the `Series` model |
 | `deid_app/render.py` | DICOM instance → `QImage` (modality LUT, VOI LUT, MONOCHROME1 inversion) |
 | `deid_app/image_view.py` | Image canvas and rubber-band box selection |
 | `deid_app/redaction.py` | The de-identification itself — pixel data and overlays |
 | `deid_app/export.py` | Export worker: mirrors the input tree into the output tree |
 | `deid_app/main_window.py` | Window assembly, tree, tabs, wiring |
-| `tests/` | Fixture generator and two headless test scripts |
+| `tests/` | Fixture generator and three headless test scripts |
 
 ## Workflow
 
@@ -52,20 +53,28 @@ uv venv --python 3.12 && uv sync
    and it stops at either end rather than wrapping. Trackpad deltas accumulate, so one
    notch-equivalent of scrolling advances exactly one image. The wheel is ignored while
    you are mid-drag on a redaction box.
-4. **Drag on the image** to place a redaction box. While dragging, releasing inside the
+4. The **Metadata** tab shows the DICOM tags of whichever instance is on screen —
+   *Field Name / Tag / VR / Size / Content*, with the `(0002,xxxx)` file meta group
+   in grey (toggle it off with the **File meta** checkbox). Sequences expand into
+   `Item n` sub-trees, multi-valued elements expand into one `value` row each, and
+   binary elements (pixel data, overlays) show their size instead of their bytes.
+   The **Filter** box narrows the tree to rows whose name, tag or content match.
+   It is read-only: nothing here is edited or exported. Note this app redacts pixels
+   and overlays only — the tags shown are **not** de-identified on export.
+5. **Drag on the image** to place a redaction box. While dragging, releasing inside the
    image keeps the box; dragging outside the image turns the selection **red** and
    releasing there discards it.
-5. Selecting a series **automatically marks it "reviewed"** — the assumption is that you
+6. Selecting a series **automatically marks it "reviewed"** — the assumption is that you
    looked at the images. Placing a box moves it to **pending** (red), and **Commit series**
    moves it to **committed** (green).
-6. **Reset boxes** drops every box on the series; it falls back to *reviewed*, since you
+7. **Reset boxes** drops every box on the series; it falls back to *reviewed*, since you
    have still seen the images. Adding a new box to a committed series re-opens it as
    pending.
-7. **Right-click a series** for a popup menu: *Set status to Clean* (clears reviewed and
+8. **Right-click a series** for a popup menu: *Set status to Clean* (clears reviewed and
    committed, and discards any boxes after a confirmation), *Commit series*, *Reset boxes*.
    Setting the currently displayed series to Clean also deselects it, so clicking it again
    re-marks it reviewed.
-8. **Export** requires every series to be **reviewed or committed**. A series carrying
+9. **Export** requires every series to be **reviewed or committed**. A series carrying
    uncommitted boxes (*pending*) blocks the export until you commit it; a *clean* series
    blocks it until you look at it. Export then prompts for an output directory and writes
    each file to the same relative path underneath it.

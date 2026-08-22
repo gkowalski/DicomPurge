@@ -1,14 +1,10 @@
-# Scuppernong - DICOM De-id
+# Scuppernong
 
-[Named after the Scuppernong River in Wisconsin.](https://en.wikipedia.org/wiki/Scuppernong_River_(Wisconsin))
+Named after the Scuppernong River in Wisconsin.
 
 A PySide6 tool for de-identifying burned-in annotations in DICOM images. You draw
 boxes on one image of a series, the boxes apply to every image in that series, and
 the export mirrors the input directory structure into an output directory.
-
-## Screenshot 
-
-![Screenshot](./images/Screenshot.png)
 
 ## Running
 
@@ -51,7 +47,11 @@ uv venv --python 3.12 && uv sync
    patient and study nodes are display-only.
 3. Selecting a series renders its first image in the **Image review** tab. The slider at
    the bottom cycles through every image in the series (multi-frame instances contribute
-   one slider position per frame).
+   one slider position per frame). **Scrolling the mouse wheel over the image** does the
+   same thing — wheel up moves toward the start of the series, wheel down toward the end,
+   and it stops at either end rather than wrapping. Trackpad deltas accumulate, so one
+   notch-equivalent of scrolling advances exactly one image. The wheel is ignored while
+   you are mid-drag on a redaction box.
 4. **Drag on the image** to place a redaction box. While dragging, releasing inside the
    image keeps the box; dragging outside the image turns the selection **red** and
    releasing there discards it.

@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6.QtCore import QEventLoop, QTimer  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from deid_app.logging_setup import configure_logging  # noqa: E402
@@ -26,6 +27,10 @@ def check(cond, msg):
     print(("  PASS  " if cond else "  FAIL  ") + msg)
     if not cond:
         failures.append(msg)
+
+
+def win_frames_for(win, series):
+    return [f for f in win._frames] if win.current_series is series else series.instances
 
 
 def pump(ms=300):
@@ -97,6 +102,44 @@ def main():
     win.slider.setValue(last)
     pump(150)
     check(win.frame_label.text() == f"{last+1} / {last+1}", "slider moves to the last frame")
+
+    # Mouse wheel over the image cycles frames just like the slider
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    def wheel(delta):
+        pos = QPointF(win.canvas.width() / 2, win.canvas.height() / 2)
+        ev = QWheelEvent(pos, win.canvas.mapToGlobal(pos.toPoint()).toPointF(),
+                         QPoint(0, 0), QPoint(0, delta), Qt.NoButton,
+                         Qt.NoModifier, Qt.NoScrollPhase, False)
+        QApplication.sendEvent(win.canvas, ev)
+        pump(60)
+
+    # Pick the 3-image series so there is something to scroll through.
+    multi = next(s for s in win.series_map.values() if len(win_frames_for(win, s)) > 1)
+    win.tree.setCurrentItem(win.series_items[multi.series_uid])
+    pump(200)
+    win.slider.setValue(0)
+    pump(60)
+    n = len(win._frames)
+    wheel(-120)
+    check(win.slider.value() == 1, f"wheel down advances one image (got {win.slider.value()})")
+    wheel(120)
+    check(win.slider.value() == 0, f"wheel up goes back one image (got {win.slider.value()})")
+    wheel(120)
+    check(win.slider.value() == 0, "wheel up at the first image clamps")
+    for _ in range(n + 3):
+        wheel(-120)
+    check(win.slider.value() == n - 1, f"wheel down clamps at the last image ({win.slider.value()} of {n-1})")
+    check(win.frame_label.text() == f"{n} / {n}", "frame counter follows the wheel")
+
+    # Fine-grained trackpad deltas accumulate to exactly one step
+    win.slider.setValue(0); pump(60)
+    for _ in range(11):
+        wheel(-10)
+    check(win.slider.value() == 0, "sub-notch trackpad deltas do not step early")
+    wheel(-10)
+    check(win.slider.value() == 1, f"accumulated trackpad deltas step once (got {win.slider.value()})")
 
     # Reset drops boxes but keeps 'reviewed'
     s = win.current_series

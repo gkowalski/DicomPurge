@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 log = logging.getLogger(__name__)
 
 MIN_BOX_PIXELS = 3.0  # ignore accidental click-drags smaller than this (screen px)
+WHEEL_NOTCH = 120     # Qt reports one mouse-wheel detent as 120 eighths-of-a-degree
 
 COMMITTED_FILL = QColor(0, 0, 0, 190)
 COMMITTED_PEN = QColor(0, 200, 0)
@@ -28,6 +29,7 @@ class ImageCanvas(QWidget):
 
     boxAdded = Signal(float, float, float, float)
     boxDiscarded = Signal()
+    stepRequested = Signal(int)  # +1 = next image, -1 = previous
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -44,6 +46,7 @@ class ImageCanvas(QWidget):
         self._drag_origin: QPointF | None = None
         self._drag_current: QPointF | None = None
         self._drag_valid = True
+        self._wheel_accumulator = 0
 
     # -- public API ------------------------------------------------------
     def set_image(self, image: QImage | None) -> None:
@@ -160,6 +163,31 @@ class ImageCanvas(QWidget):
         )
         self.boxAdded.emit(*box)
 
+    def wheelEvent(self, event) -> None:
+        """Scroll through the series, exactly like dragging the slider below."""
+        if self._pixmap is None:
+            super().wheelEvent(event)
+            return
+        if self._drag_origin is not None:
+            # Mid-selection: don't move the image out from under the box.
+            event.accept()
+            return
+
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if not delta:
+            event.ignore()
+            return
+
+        # Accumulate so high-resolution trackpads (which send many small deltas)
+        # advance one image per notch-equivalent rather than flying past.
+        self._wheel_accumulator += delta
+        steps = int(self._wheel_accumulator / WHEEL_NOTCH)
+        if steps:
+            self._wheel_accumulator -= steps * WHEEL_NOTCH
+            # Wheel up moves toward the start of the series, as a scrollbar would.
+            self.stepRequested.emit(-steps)
+        event.accept()
+
     def leaveEvent(self, event) -> None:
         if self._drag_origin is not None:
             self._drag_valid = False
@@ -167,6 +195,7 @@ class ImageCanvas(QWidget):
         super().leaveEvent(event)
 
     def _cancel_drag(self) -> None:
+        self._wheel_accumulator = 0
         self._drag_origin = None
         self._drag_current = None
         self._drag_valid = True

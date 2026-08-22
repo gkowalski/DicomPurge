@@ -178,6 +178,7 @@ class MainWindow(QMainWindow):
         self.canvas = ImageCanvas()
         self.canvas.boxAdded.connect(self._on_box_added)
         self.canvas.boxDiscarded.connect(self._on_box_discarded)
+        self.canvas.stepRequested.connect(self._step_frame)
         layout.addWidget(self.canvas, 1)
 
         slider_row = QHBoxLayout()
@@ -573,6 +574,16 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_slider_changed(self, value: int) -> None:
         self._show_frame(value)
+
+    @Slot(int)
+    def _step_frame(self, step: int) -> None:
+        """Mouse-wheel scrolling over the image: same path as moving the slider."""
+        if not self._frames or len(self._frames) < 2:
+            return
+        target = self.slider.value() + step
+        target = max(0, min(target, self.slider.maximum()))
+        if target != self.slider.value():
+            self.slider.setValue(target)  # fires _on_slider_changed -> _show_frame
 
     # -- boxes -----------------------------------------------------------
     @Slot(float, float, float, float)

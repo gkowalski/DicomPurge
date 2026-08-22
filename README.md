@@ -8,7 +8,7 @@ the export mirrors the input directory structure into an output directory.
 
 ## Screenshot 
 
-![Screenshot](images/screenshot.png)
+![Screenshot](./images/Screenshot.png)
 
 ## Running
 

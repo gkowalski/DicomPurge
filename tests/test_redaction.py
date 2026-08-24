@@ -1,4 +1,5 @@
-"""Headless check: redaction blanks pixel data and overlay bits, and export mirrors the tree."""
+"""Headless check: redaction blanks pixel data and Graphics overlay bits (never ROI),
+and export mirrors the tree."""
 from __future__ import annotations
 
 import logging
@@ -76,8 +77,16 @@ def main():
         if str(getattr(ds, "PhotometricInterpretation", "")).startswith("YBR"):
             check(False, "photometric interpretation left as YBR")
 
-        for group in (0x6000, 0x6002):
+        original = pydicom.dcmread(str(src))
+        for group in (0x6000, 0x6002, 0x6004):
             if (group, 0x3000) not in ds:
+                continue
+            if str(ds[(group, 0x0040)].value).strip().upper() != "G":
+                check(
+                    bytes(ds[(group, 0x3000)].value)
+                    == bytes(original[(group, 0x3000)].value),
+                    f"ROI overlay ({group:04X},3000) left untouched",
+                )
                 continue
             planes = overlay_planes(ds, group)
             o_rows, o_cols = planes.shape[1], planes.shape[2]

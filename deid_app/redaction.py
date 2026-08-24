@@ -2,6 +2,10 @@
 
 Boxes arrive as normalised fractions of the image (x, y, w, h in 0..1), which
 makes them independent of instance size and of any display scaling.
+
+Only Graphics overlays are redacted: an overlay whose Overlay Type (60xx,0040)
+is ``R`` (Region of Interest) carries no burned-in content, so it is left
+byte-for-byte unchanged.
 """
 from __future__ import annotations
 
@@ -13,14 +17,13 @@ from pydicom.dataset import Dataset
 from pydicom.uid import ExplicitVRLittleEndian
 
 from .compat import convert_color_space
+from .overlays import overlay_groups, read_overlay
 
 log = logging.getLogger(__name__)
 
 # pydicom 3 already returns RGB for YBR source data; pydicom 2 does not.
 PYDICOM_MAJOR = int(str(pydicom.__version__).split(".")[0])
 
-OVERLAY_GROUP_START = 0x6000
-OVERLAY_GROUP_END = 0x601E
 
 
 def _boxes_to_pixels(boxes, rows: int, columns: int) -> list[tuple[int, int, int, int]]:
@@ -114,57 +117,22 @@ def _apply_to_pixel_data(ds: Dataset, boxes) -> int:
     return frames
 
 
-def _overlay_groups(ds: Dataset) -> list[int]:
-    groups = set()
-    for elem in ds:
-        group = elem.tag.group
-        if OVERLAY_GROUP_START <= group <= OVERLAY_GROUP_END and group % 2 == 0:
-            if elem.tag.element == 0x3000:
-                groups.add(group)
-    return sorted(groups)
-
-
 def _apply_to_overlay(ds: Dataset, group: int, boxes) -> bool:
-    """Blank the boxes in one (60xx,3000) overlay plane. Returns True if changed."""
-    data_elem = ds[(group, 0x3000)]
-    raw = data_elem.value
-    if raw is None:
+    """Blank the boxes in one (60xx,3000) overlay plane. Returns True if changed.
+
+    Region-of-Interest overlays are skipped; only Graphics overlays are redacted.
+    """
+    overlay = read_overlay(ds, group)
+    if overlay is None:
         return False
 
-    ov_rows = int(ds[(group, 0x0010)].value)
-    ov_cols = int(ds[(group, 0x0011)].value)
-    ov_frames = int(ds[(group, 0x0015)].value) if (group, 0x0015) in ds else 1
-    ov_frames = max(1, ov_frames)
-    bits_allocated = int(ds[(group, 0x0100)].value) if (group, 0x0100) in ds else 1
-
-    if bits_allocated != 1:
-        log.warning(
-            "Overlay (%04X,3000): OverlayBitsAllocated=%d is not supported; skipped",
-            group,
-            bits_allocated,
+    if not overlay.is_graphics:
+        log.info(
+            "Overlay %s: Overlay Type %r is not G; left unchanged",
+            overlay.label,
+            overlay.overlay_type,
         )
         return False
-
-    origin_row, origin_col = 1, 1
-    if (group, 0x0050) in ds:
-        origin = ds[(group, 0x0050)].value
-        try:
-            origin_row, origin_col = int(origin[0]), int(origin[1])
-        except Exception:  # noqa: BLE001
-            log.warning("Overlay (%04X,3000): unreadable OverlayOrigin %r", group, origin)
-
-    needed_bits = ov_frames * ov_rows * ov_cols
-    bits = np.unpackbits(np.frombuffer(bytes(raw), dtype=np.uint8), bitorder="little")
-    if bits.size < needed_bits:
-        log.error(
-            "Overlay (%04X,3000): expected %d bits but only %d present; skipped",
-            group,
-            needed_bits,
-            bits.size,
-        )
-        return False
-    padding = bits[needed_bits:]
-    planes = bits[:needed_bits].reshape(ov_frames, ov_rows, ov_cols)
 
     # Boxes are expressed against the image grid; map them onto the overlay grid
     # using the (1-based) overlay origin.
@@ -172,36 +140,32 @@ def _apply_to_overlay(ds: Dataset, group: int, boxes) -> bool:
     image_cols = int(ds.Columns)
     changed = False
     for r0, r1, c0, c1 in _boxes_to_pixels(boxes, image_rows, image_cols):
-        or0 = max(0, r0 - (origin_row - 1))
-        or1 = min(ov_rows, r1 - (origin_row - 1))
-        oc0 = max(0, c0 - (origin_col - 1))
-        oc1 = min(ov_cols, c1 - (origin_col - 1))
+        or0 = max(0, r0 - (overlay.origin_row - 1))
+        or1 = min(overlay.rows, r1 - (overlay.origin_row - 1))
+        oc0 = max(0, c0 - (overlay.origin_col - 1))
+        oc1 = min(overlay.columns, c1 - (overlay.origin_col - 1))
         if or1 > or0 and oc1 > oc0:
-            planes[:, or0:or1, oc0:oc1] = 0
+            overlay.planes[:, or0:or1, oc0:oc1] = 0
             changed = True
 
     if not changed:
-        log.debug("Overlay (%04X,3000): no box intersects the overlay plane", group)
+        log.debug("Overlay %s: no box intersects the overlay plane", overlay.label)
         return False
 
-    out_bits = np.concatenate([planes.reshape(-1), padding])
-    packed = np.packbits(out_bits, bitorder="little").tobytes()
-    if len(packed) % 2:
-        packed += b"\x00"
-    data_elem.value = packed
-    log.info("Overlay (%04X,3000) redacted (%d frame(s))", group, ov_frames)
+    ds[(group, 0x3000)].value = overlay.packed()
+    log.info("Overlay %s redacted (%d frame(s))", overlay.label, overlay.frames)
     return True
 
 
 def redact_dataset(ds: Dataset, boxes) -> dict:
-    """Apply the boxes to pixel data and every overlay plane. Mutates `ds`."""
+    """Apply the boxes to pixel data and every Graphics overlay. Mutates `ds`."""
     summary = {"frames": 0, "overlays": []}
     if not boxes:
         return summary
 
     summary["frames"] = _apply_to_pixel_data(ds, boxes)
 
-    for group in _overlay_groups(ds):
+    for group in overlay_groups(ds):
         try:
             if _apply_to_overlay(ds, group, boxes):
                 summary["overlays"].append(f"{group:04X}")

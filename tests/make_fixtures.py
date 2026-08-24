@@ -1,4 +1,4 @@
-"""Build a synthetic DICOM tree (mono, RGB, multiframe, overlays, JPEG) for testing."""
+"""Build a synthetic DICOM tree (mono, RGB, multiframe, G/R overlays, JPEG) for testing."""
 from __future__ import annotations
 
 import sys
@@ -36,18 +36,33 @@ def _base(rows, cols, series_uid, series_num, desc, modality="OT"):
     return ds
 
 
-def add_overlay(ds, group, rows, cols, origin=(1, 1), frames=1):
-    plane = np.ones((frames, rows, cols), dtype=np.uint8)  # every bit set
+def add_overlay(
+    ds,
+    group,
+    rows,
+    cols,
+    origin=(1, 1),
+    frames=1,
+    overlay_type="G",
+    plane=None,
+    image_frame_origin=None,
+):
+    """Attach a (60xx,3000) overlay. `plane` defaults to every bit set."""
+    if plane is None:
+        plane = np.ones((frames, rows, cols), dtype=np.uint8)
+    plane = np.asarray(plane, dtype=np.uint8).reshape(frames, rows, cols)
     packed = np.packbits(plane.reshape(-1), bitorder="little").tobytes()
     if len(packed) % 2:
         packed += b"\x00"
     ds.add_new((group, 0x0010), "US", rows)
     ds.add_new((group, 0x0011), "US", cols)
-    ds.add_new((group, 0x0040), "CS", "G")
+    ds.add_new((group, 0x0040), "CS", overlay_type)
     ds.add_new((group, 0x0050), "SS", list(origin))
     ds.add_new((group, 0x0100), "US", 1)
     ds.add_new((group, 0x0102), "US", 0)
     ds.add_new((group, 0x0015), "IS", frames)
+    if image_frame_origin is not None:
+        ds.add_new((group, 0x0051), "US", image_frame_origin)
     ds.add_new((group, 0x3000), "OW", packed)
 
 
@@ -74,6 +89,8 @@ def build(root: Path):
         ds.PixelData = arr.tobytes()
         add_overlay(ds, 0x6000, rows, cols)
         add_overlay(ds, 0x6002, 32, 32, origin=(1, 1))
+        # An ROI overlay: displayed for context, never redacted.
+        add_overlay(ds, 0x6004, 16, 16, origin=(33, 33), overlay_type="R")
         save(ds, root / "patientA" / "study1" / f"mono_{i}.dcm")
 
     # Series 2: RGB multiframe.

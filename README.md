@@ -21,6 +21,9 @@ your interpreter, pin the venv to an older Python and re-sync:
 ```bash
 uv venv --python 3.12 && uv sync
 ```
+## UI Screenshot 
+
+![Screenshot](./images/Screenshot.png)
 
 ## Layout
 

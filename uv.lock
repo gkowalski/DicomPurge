@@ -8,7 +8,7 @@ resolution-markers = [
 
 [[package]]
 name = "de-id-python-program"
-version = "1.0.0"
+version = "0.0.2"
 source = { virtual = "." }
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },

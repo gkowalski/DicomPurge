@@ -1,6 +1,6 @@
 [project]
 name = "de-id-python-program"
-version = "1.0.0"
+version = "0.0.2"
 description = "Scuppernong - PySide6 tool for de-identifying burned-in annotations in DICOM images"
 requires-python = ">=3.11,<3.15"
 dependencies = [

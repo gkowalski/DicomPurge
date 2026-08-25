@@ -2,9 +2,19 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, Slot
+from PySide6.QtCore import (
+    QCoreApplication,
+    QEvent,
+    QSettings,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -14,6 +24,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QSlider,
     QSplitter,
@@ -28,19 +39,33 @@ from PySide6.QtWidgets import (
     QMainWindow,
 )
 
+from .decode_cache import DatasetCache, FrameCache
 from .export import start_export
-from .image_view import ImageCanvas
+from .frame_worker import (
+    FrameRenderRequest,
+    FrameRenderResult,
+    FrameWorker,
+    PrefetchRequest,
+    PrefetchWorker,
+)
+from .image_view import ImageCanvas, WheelAccumulator
 from .log_pane import LogPane
 from .logging_setup import LogBridge
 from .metadata_pane import MetadataPane
 from .model import Series, start_scan
 from .resources import LOGO_PATH, app_icon, logo_pixmap
-from .render import dataset_to_qimage, frame_count, has_pixel_data, read_dataset
-from .sr_render import dataset_to_html, is_structured_report
+from .render import frame_count, read_dataset_header
 
 log = logging.getLogger(__name__)
 
 SERIES_UID_ROLE = Qt.UserRole + 1
+# How far the prefetcher runs ahead of / behind the frame on screen. Ahead is
+# deeper because a scroll keeps going the way it started; behind covers the
+# small back-step people make after overshooting.
+PREFETCH_AHEAD = 6
+PREFETCH_BEHIND = 2
+# How long the scroll has to settle before the Metadata tab is rebuilt.
+METADATA_DEBOUNCE_MS = 250
 STATUS_COLORS = {
     "clean": QColor("#9e9e9e"),
     "reviewed": QColor("#1e7fd4"),
@@ -69,6 +94,9 @@ def _status_icon(status: str) -> QIcon:
 
 
 class MainWindow(QMainWindow):
+    renderRequested = Signal(object)
+    prefetchRequested = Signal(object)
+
     def __init__(self, bridge: LogBridge) -> None:
         super().__init__()
         self.setWindowTitle("Scuppernong - DICOM De-identification")
@@ -83,10 +111,55 @@ class MainWindow(QMainWindow):
 
         # (instance_index, frame_index) pairs for the selected series.
         self._frames: list[tuple[int, int]] = []
-        self._cache_path: Path | None = None
-        self._cache_ds = None
         # Path whose tags the Metadata tab is currently showing.
         self._metadata_path: Path | None = None
+
+        # Background frame decoding: bumping _render_epoch invalidates any
+        # in-flight/pending render belonging to a since-abandoned series or
+        # selection. Only one render is ever in flight; a newer request
+        # while one is running just overwrites _render_pending so a fast
+        # scrub skips straight to the position the user settles on.
+        self._render_epoch = 0
+        self._render_inflight = False
+        # Modal "loading series" popup, alive from the click on a series until
+        # its first frame is on screen. None whenever nothing is loading.
+        self._load_dialog: QProgressDialog | None = None
+        # Notch accumulation for wheel events over the frame slider.
+        self._slider_wheel = WheelAccumulator()
+        # Metadata tab is rebuilt lazily: this holds what it *should* show, and
+        # _metadata_path what it is actually showing.
+        self._pending_metadata: tuple[Series, object, object] | None = None
+        self._metadata_timer = QTimer(self)
+        self._metadata_timer.setSingleShot(True)
+        self._metadata_timer.setInterval(METADATA_DEBOUNCE_MS)
+        self._metadata_timer.timeout.connect(self._flush_metadata)
+        self._render_pending: FrameRenderRequest | None = None
+        # Decoded datasets and rendered frames, shared with both workers. The
+        # frame cache is what makes a re-visited image appear instantly; the
+        # dataset cache mostly serves multi-frame instances.
+        self._dataset_cache = DatasetCache(capacity=12)
+        self._frame_cache = FrameCache(capacity=64)
+        # Position the user is actually on. A worker result for anything else
+        # is stale - it can be outrun by a cache hit displayed while it was
+        # still decoding - and must not be painted over the current image.
+        self._render_target: int | None = None
+        # Last position handed to _prefetch_neighbors, for direction of travel.
+        self._last_position: int | None = None
+
+        self._frame_thread = QThread()
+        self._frame_worker = FrameWorker(self._dataset_cache, self._frame_cache)
+        self._frame_worker.moveToThread(self._frame_thread)
+        self.renderRequested.connect(self._frame_worker.render)
+        self._frame_worker.rendered.connect(self._on_frame_rendered)
+        self._frame_thread.start()
+
+        # Opportunistic neighbor-instance prefetch, on its own thread so a
+        # slow prefetch decode never delays a real user-requested render.
+        self._prefetch_thread = QThread()
+        self._prefetch_worker = PrefetchWorker(self._dataset_cache, self._frame_cache)
+        self._prefetch_worker.moveToThread(self._prefetch_thread)
+        self.prefetchRequested.connect(self._prefetch_worker.prefetch)
+        self._prefetch_thread.start()
 
         self._scan_thread = None
         self._scan_worker = None
@@ -158,6 +231,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.metadata_pane, "Metadata")
         self.log_pane = LogPane(bridge)
         self.tabs.addTab(self.log_pane, "Log")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         splitter.addWidget(self.tabs)
 
         splitter.setStretchFactor(0, 0)
@@ -219,6 +293,9 @@ class MainWindow(QMainWindow):
         self.slider.setMinimum(0)
         self.slider.setMaximum(0)
         self.slider.valueChanged.connect(self._on_slider_changed)
+        # Qt's own wheel handling on a horizontal slider runs the opposite way
+        # to the image canvas, so the filter below owns the wheel instead.
+        self.slider.installEventFilter(self)
         slider_row.addWidget(self.slider, 1)
         self.frame_label = QLabel("- / -")
         self.frame_label.setMinimumWidth(90)
@@ -364,12 +441,17 @@ class MainWindow(QMainWindow):
 
     # -- tree ------------------------------------------------------------
     def _clear_series(self) -> None:
+        self._close_load_dialog()
+        self._frame_cache.clear()
         self.series_map = {}
         self.series_items = {}
         self.current_series = None
         self._frames = []
-        self._cache_path = None
-        self._cache_ds = None
+        self._render_epoch += 1
+        self._render_target = None
+        self._last_position = None
+        self._metadata_timer.stop()
+        self._pending_metadata = None
         self._metadata_path = None
         self.tree.clear()
         self.metadata_pane.clear()
@@ -511,8 +593,14 @@ class MainWindow(QMainWindow):
 
     def _clear_selection_view(self) -> None:
         """Return the review tab to its empty state without touching the model."""
+        self._close_load_dialog()
         self.current_series = None
         self._frames = []
+        self._render_epoch += 1
+        self._render_target = None
+        self._last_position = None
+        self._metadata_timer.stop()
+        self._pending_metadata = None
         self._metadata_path = None
         self.metadata_pane.clear()
         self.canvas.set_image(None)
@@ -533,6 +621,7 @@ class MainWindow(QMainWindow):
     # -- series display --------------------------------------------------
     def _select_series(self, series: Series) -> None:
         self.current_series = series
+        self._render_epoch += 1
         log.info(
             "Series selected: %s (%d image(s))",
             series.series_description or series.series_uid,
@@ -549,15 +638,14 @@ class MainWindow(QMainWindow):
             self._refresh_item(series)
             self._update_export_button()
 
-        self._frames = []
-        for index, instance in enumerate(series.instances):
-            try:
-                ds = self._dataset_for(instance.path)
-                frames = frame_count(ds)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Could not read %s: %s", instance.path, exc)
-                frames = 1
-            self._frames.extend((index, f) for f in range(frames))
+        self._last_position = None
+        # Called directly, not through a queued signal: a signal would be
+        # delivered *behind* the stale prefetch requests it is meant to cancel.
+        # Assigning an int is atomic, so the worker thread sees it at once.
+        self._prefetch_worker.set_epoch(self._render_epoch)
+
+        self._open_load_dialog(series)
+        self._frames = self._scan_series_frames(series)
 
         self.slider.blockSignals(True)
         self.slider.setMinimum(0)
@@ -571,31 +659,167 @@ class MainWindow(QMainWindow):
         self.reset_button.setEnabled(True)
         self.commit_button.setEnabled(True)
         self._update_boxes_label()
-        self._show_frame(0)
+        if not self._frames:
+            self._close_load_dialog()
+            return
+        self._update_load_dialog("Decoding first image...")
+        self._request_frame(0)
 
-    def _dataset_for(self, path: Path):
-        if self._cache_path == path and self._cache_ds is not None:
-            return self._cache_ds
-        ds = read_dataset(path)
-        self._cache_path = path
-        self._cache_ds = ds
-        return ds
+    # -- loading popup ---------------------------------------------------
+    def _open_load_dialog(self, series: Series) -> None:
+        """Arm the modal load popup for `series`.
 
-    def _show_frame(self, position: int) -> None:
+        The dialog is created hidden and only shown if the load is still
+        running 300 ms later, so a small series never flashes a window. It is
+        never `exec()`ed: it stays up across the async first-frame decode
+        without blocking the event loop, and `_close_load_dialog` retires it.
+        """
+        self._close_load_dialog()
+        dialog = QProgressDialog(
+            f"Loading {series.label()}...", "", 0, max(1, len(series.instances)), self
+        )
+        dialog.setWindowTitle("Loading series")
+        dialog.setCancelButton(None)
+        dialog.setWindowModality(Qt.ApplicationModal)
+        # A huge minimum duration disables Qt's own auto-show heuristic, which
+        # is what failed before: with the GUI thread pinned in the header loop
+        # it only fired near the end. The QTimer below shows the dialog instead.
+        dialog.setMinimumDuration(24 * 60 * 60 * 1000)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumWidth(420)
+        self._load_dialog = dialog
+        QTimer.singleShot(300, self._show_load_dialog)
+
+    def _show_load_dialog(self) -> None:
+        dialog = self._load_dialog
+        if dialog is None:
+            return
+        dialog.show()
+        dialog.raise_()
+        QCoreApplication.processEvents()
+
+    def _update_load_dialog(self, text: str, value: int | None = None) -> None:
+        dialog = self._load_dialog
+        if dialog is None:
+            return
+        dialog.setLabelText(text)
+        if value is None:
+            dialog.setRange(0, 0)  # indeterminate
+        else:
+            dialog.setValue(value)
+        QCoreApplication.processEvents()
+
+    def _close_load_dialog(self) -> None:
+        dialog = self._load_dialog
+        self._load_dialog = None
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
+
+    def _scan_series_frames(self, series: Series) -> list[tuple[int, int]]:
+        """Build the (instance_index, frame_index) list for `series`.
+
+        Reading every header is the first half of the stall the user sees after
+        clicking a series, so it drives the load popup as it goes. The second
+        half - decoding the first frame - happens on the worker thread after
+        this returns, which is why the popup outlives this call.
+        """
+        total = len(series.instances)
+        frames: list[tuple[int, int]] = []
+        started = time.perf_counter()
+        for index, instance in enumerate(series.instances):
+            self._update_load_dialog(
+                f"Reading headers...\n{instance.path.name}  ({index + 1} of {total})",
+                index,
+            )
+            try:
+                ds = read_dataset_header(instance.path)
+                count = frame_count(ds)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Could not read %s: %s", instance.path, exc)
+                count = 1
+            frames.extend((index, f) for f in range(count))
+        log.info(
+            "Header scan of %d instance(s) took %.2fs (%d frame(s))",
+            total,
+            time.perf_counter() - started,
+            len(frames),
+        )
+        return frames
+
+    def _request_frame(self, position: int) -> None:
+        """Ask the background worker to decode `position`.
+
+        Only one render is ever in flight; a request that arrives while one
+        is running just replaces `_render_pending` so a fast scrub skips
+        straight to wherever the user settles, instead of blocking the GUI
+        thread or queuing up every intermediate frame.
+        """
         series = self.current_series
         if series is None or not self._frames:
             return
         position = max(0, min(position, len(self._frames) - 1))
+        self._render_target = position
         instance_index, frame_index = self._frames[position]
         instance = series.instances[instance_index]
-        try:
-            ds = self._dataset_for(instance.path)
-            self._show_metadata(series, instance, ds)
-            if is_structured_report(ds):
-                self.report_view.setHtml(dataset_to_html(ds))
+
+        # Already rendered (by an earlier visit or by the prefetcher): paint it
+        # now rather than queueing behind whatever the worker is chewing on.
+        cached = self._frame_cache.get(instance.path, frame_index)
+        if cached is not None:
+            kind, payload, ds = cached
+            self._apply_frame_result(
+                FrameRenderResult(
+                    self._render_epoch, position, instance, frame_index,
+                    ds, kind, payload,
+                )
+            )
+            return
+
+        request = FrameRenderRequest(self._render_epoch, position, instance, frame_index)
+        if self._render_inflight:
+            self._render_pending = request
+            return
+        self._render_inflight = True
+        self.renderRequested.emit(request)
+
+    @Slot(object)
+    def _on_frame_rendered(self, result: FrameRenderResult) -> None:
+        self._render_inflight = False
+        stale = self._render_target is not None and result.position != self._render_target
+        if result.epoch == self._render_epoch and not stale:
+            # Whatever came back - image, report, no-pixel or error - the load
+            # this popup was covering is over. A stale epoch means a newer
+            # selection owns the current dialog, so leave it alone.
+            self._close_load_dialog()
+            self._apply_frame_result(result)
+        if self._render_pending is not None:
+            pending = self._render_pending
+            self._render_pending = None
+            self._render_inflight = True
+            self.renderRequested.emit(pending)
+
+    def _apply_frame_result(self, result: FrameRenderResult) -> None:
+        series = self.current_series
+        if series is None:
+            return
+        instance = result.instance
+        if result.kind == "error":
+            log.exception("Failed to render %s: %s", instance.path, result.payload)
+            self.canvas.set_image(None)
+            self.canvas.set_placeholder(
+                f"Could not render {instance.path.name}:\n{result.payload}\n"
+                "(the pixel data may need pylibjpeg / gdcm)"
+            )
+            self.view_stack.setCurrentWidget(self.canvas)
+        else:
+            self._show_metadata(series, instance, result.ds)
+            if result.kind == "report":
+                self.report_view.setHtml(result.payload)
                 self.view_stack.setCurrentWidget(self.report_view)
-            elif not has_pixel_data(ds):
-                sop_uid = getattr(ds, "SOPClassUID", None)
+            elif result.kind == "no_pixel":
+                sop_uid = getattr(result.ds, "SOPClassUID", None)
                 sop_name = sop_uid.name if sop_uid is not None else "Unknown SOP Class"
                 log.info("No pixel data for %s (%s)", instance.path, sop_name)
                 self.canvas.set_image(None)
@@ -605,39 +829,121 @@ class MainWindow(QMainWindow):
                 )
                 self.view_stack.setCurrentWidget(self.canvas)
             else:
-                image = dataset_to_qimage(ds, frame_index)
-                self.canvas.set_image(image)
+                started = time.perf_counter()
+                self.canvas.set_image(result.payload)
                 self.view_stack.setCurrentWidget(self.canvas)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("Failed to render %s: %s", instance.path, exc)
-            self.canvas.set_image(None)
-            self.canvas.set_placeholder(
-                f"Could not render {instance.path.name}:\n{exc}\n"
-                "(the pixel data may need pylibjpeg / gdcm)"
-            )
-            self.view_stack.setCurrentWidget(self.canvas)
+                log.debug(
+                    "Displayed %s in %.0f ms",
+                    instance.path.name,
+                    (time.perf_counter() - started) * 1000.0,
+                )
 
-        self.frame_label.setText(f"{position + 1} / {len(self._frames)}")
+        self.frame_label.setText(f"{result.position + 1} / {len(self._frames)}")
         self.header_label.setText(
             f"{series.patient_name} - {series.label()}   |   {instance.path.name}"
-            + (f"  (frame {frame_index + 1})" if frame_count_safe(self._cache_ds) > 1 else "")
+            + (f"  (frame {result.frame_index + 1})" if frame_count_safe(result.ds) > 1 else "")
         )
+        self._prefetch_neighbors(result.position)
+
+    def _prefetch_neighbors(self, position: int) -> None:
+        """Render the frames the user is heading towards into the caches.
+
+        Direction is inferred from the previous position, so a steady scroll
+        warms what is coming rather than what has just been passed. Purely
+        best-effort: a stale request (series changed before the prefetch
+        thread got to it) is dropped by the worker's epoch check, and a
+        request that never lands only costs one on-demand decode later.
+        """
+        series = self.current_series
+        if series is None or not self._frames:
+            return
+        previous = self._last_position
+        self._last_position = position
+        forward = previous is None or position >= previous
+        # Where the user actually is, so the worker can drop requests that a
+        # fast scrub has already left behind.
+        self._prefetch_worker.set_focus(position)
+
+        offsets = [o for o in range(1, PREFETCH_AHEAD + 1)]
+        offsets += [-o for o in range(1, PREFETCH_BEHIND + 1)]
+        if not forward:
+            offsets = [-o for o in offsets]
+
+        for offset in offsets:
+            neighbor = position + offset
+            if not (0 <= neighbor < len(self._frames)):
+                continue
+            instance_index, frame_index = self._frames[neighbor]
+            instance = series.instances[instance_index]
+            if self._frame_cache.has(instance.path, frame_index):
+                continue
+            self.prefetchRequested.emit(
+                PrefetchRequest(self._render_epoch, instance, frame_index, neighbor)
+            )
 
     def _show_metadata(self, series: Series, instance, ds) -> None:
-        """Refresh the Metadata tab, but only when the instance actually changed."""
+        """Note which instance the Metadata tab owes, and rebuild it lazily.
+
+        Building the tag tree walks (and re-encodes) every element, which is
+        far too much to do per frame on the GUI thread while someone scrolls.
+        The debounce means it happens once, when the scroll settles, instead of
+        once per image; switching to that tab flushes it immediately.
+        """
+        if self._metadata_path == instance.path:
+            return
+        self._pending_metadata = (series, instance, ds)
+        self._metadata_timer.start()
+
+    def _flush_metadata(self) -> None:
+        """Rebuild the Metadata tab from whatever _show_metadata last noted."""
+        pending = self._pending_metadata
+        if pending is None:
+            return
+        series, instance, ds = pending
         if self._metadata_path == instance.path:
             return
         self._metadata_path = instance.path
+        started = time.perf_counter()
         try:
             self.metadata_pane.show_dataset(
                 ds, f"{series.label()}   |   {instance.path.name}"
             )
         except Exception as exc:  # noqa: BLE001
             log.exception("Could not show metadata for %s: %s", instance.path, exc)
+        log.debug(
+            "Metadata tree for %s built in %.0f ms",
+            instance.path.name,
+            (time.perf_counter() - started) * 1000.0,
+        )
+
+    @Slot(int)
+    def _on_tab_changed(self, _index: int) -> None:
+        """Don't make someone who just opened the Metadata tab wait out the
+        debounce - build it now."""
+        if self.tabs.currentWidget() is self.metadata_pane:
+            self._metadata_timer.stop()
+            self._flush_metadata()
 
     @Slot(int)
     def _on_slider_changed(self, value: int) -> None:
-        self._show_frame(value)
+        if self._frames:
+            self.frame_label.setText(f"{value + 1} / {len(self._frames)}")
+        self._request_frame(value)
+
+    def eventFilter(self, obj, event):
+        """Give the frame slider the same wheel direction as the image.
+
+        Wheel up moves toward the start of the series in both places, which
+        means swallowing the slider's built-in handling (it runs the other
+        way for a horizontal slider) and stepping it ourselves.
+        """
+        if obj is self.slider and event.type() == QEvent.Wheel:
+            delta = event.angleDelta().y() or event.angleDelta().x()
+            steps = self._slider_wheel.steps(delta) if delta else 0
+            if steps:
+                self._step_frame(-steps)
+            return True
+        return super().eventFilter(obj, event)
 
     @Slot(int)
     def _step_frame(self, step: int) -> None:
@@ -647,7 +953,7 @@ class MainWindow(QMainWindow):
         target = self.slider.value() + step
         target = max(0, min(target, self.slider.maximum()))
         if target != self.slider.value():
-            self.slider.setValue(target)  # fires _on_slider_changed -> _show_frame
+            self.slider.setValue(target)  # fires _on_slider_changed -> _request_frame
 
     # -- boxes -----------------------------------------------------------
     @Slot(float, float, float, float)
@@ -838,6 +1144,7 @@ class MainWindow(QMainWindow):
 
     # -- lifecycle -------------------------------------------------------
     def closeEvent(self, event) -> None:
+        self._close_load_dialog()
         for worker, thread in (
             (self._scan_worker, self._scan_thread),
             (self._export_worker, self._export_thread),
@@ -847,6 +1154,12 @@ class MainWindow(QMainWindow):
                     worker.cancel()
                 thread.quit()
                 thread.wait(3000)
+        if self._frame_thread.isRunning():
+            self._frame_thread.quit()
+            self._frame_thread.wait(3000)
+        if self._prefetch_thread.isRunning():
+            self._prefetch_thread.quit()
+            self._prefetch_thread.wait(3000)
         log.info("Application closing")
         super().closeEvent(event)
 

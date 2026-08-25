@@ -31,7 +31,9 @@ def _to_8bit(ds, arr: np.ndarray) -> np.ndarray:
     except Exception as exc:  # noqa: BLE001
         log.debug("VOI LUT not applied: %s", exc)
 
-    arr = np.asarray(arr, dtype=np.float64)
+    # float32 is plenty for an 8-bit result and halves the memory traffic of
+    # the window/level pass, which runs for every frame the user scrolls past.
+    arr = np.asarray(arr, dtype=np.float32)
     lo = float(np.min(arr))
     hi = float(np.max(arr))
     if hi <= lo:
@@ -49,6 +51,11 @@ def frame_count(ds) -> int:
 
 def read_dataset(path) -> pydicom.Dataset:
     return pydicom.dcmread(str(path))
+
+
+def read_dataset_header(path) -> pydicom.Dataset:
+    """Read metadata only, skipping pixel data - cheap enough to call per-instance."""
+    return pydicom.dcmread(str(path), stop_before_pixels=True)
 
 
 PIXEL_DATA_TAGS = ("PixelData", "FloatPixelData", "DoubleFloatPixelData")
@@ -127,6 +134,6 @@ def dataset_to_qimage(ds, frame_index: int = 0) -> QImage:
 
 
 def _scale_colour(rgb: np.ndarray) -> np.ndarray:
-    rgb = np.asarray(rgb, dtype=np.float64)
+    rgb = np.asarray(rgb, dtype=np.float32)
     hi = float(rgb.max()) or 1.0
     return np.ascontiguousarray((rgb / hi * 255.0).astype(np.uint8))

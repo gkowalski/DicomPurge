@@ -20,6 +20,26 @@ INVALID_PEN = QColor(220, 40, 40)
 INVALID_FILL = QColor(220, 40, 40, 70)
 
 
+class WheelAccumulator:
+    """Turns a stream of wheel deltas into whole notches.
+
+    High-resolution trackpads send many small deltas per flick; accumulating
+    them means one flick advances one image instead of flying past.
+    """
+
+    def __init__(self) -> None:
+        self._delta = 0
+
+    def steps(self, delta: int) -> int:
+        self._delta += delta
+        steps = int(self._delta / WHEEL_NOTCH)
+        self._delta -= steps * WHEEL_NOTCH
+        return steps
+
+    def reset(self) -> None:
+        self._delta = 0
+
+
 class ImageCanvas(QWidget):
     """Aspect-correct image display with rubber-band box selection.
 
@@ -46,11 +66,20 @@ class ImageCanvas(QWidget):
         self._drag_origin: QPointF | None = None
         self._drag_current: QPointF | None = None
         self._drag_valid = True
-        self._wheel_accumulator = 0
+        self._wheel = WheelAccumulator()
+
+        # The displayed image, already scaled to the widget. Rescaling a large
+        # image smoothly costs real time, and paintEvent runs on every
+        # mouse-move during a box drag, so the result is kept until the image
+        # or the widget size changes.
+        self._scaled: QPixmap | None = None
+        self._scaled_key: tuple | None = None
 
     # -- public API ------------------------------------------------------
     def set_image(self, image: QImage | None) -> None:
         self._pixmap = QPixmap.fromImage(image) if image is not None else None
+        self._scaled = None
+        self._scaled_key = None
         self._cancel_drag()
         self.update()
 
@@ -68,6 +97,22 @@ class ImageCanvas(QWidget):
         if not editable:
             self._cancel_drag()
         self.update()
+
+    def _scaled_pixmap(self, target: QRect) -> QPixmap:
+        """The image scaled to `target`, reused across repaints."""
+        size = target.size()
+        key = (self._pixmap.cacheKey(), size.width(), size.height())
+        if self._scaled is None or self._scaled_key != key:
+            self._scaled = self._pixmap.scaled(
+                size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+            )
+            self._scaled_key = key
+        return self._scaled
+
+    def resizeEvent(self, event) -> None:
+        self._scaled = None
+        self._scaled_key = None
+        super().resizeEvent(event)
 
     # -- geometry --------------------------------------------------------
     def _image_rect(self) -> QRectF | None:
@@ -178,13 +223,10 @@ class ImageCanvas(QWidget):
             event.ignore()
             return
 
-        # Accumulate so high-resolution trackpads (which send many small deltas)
-        # advance one image per notch-equivalent rather than flying past.
-        self._wheel_accumulator += delta
-        steps = int(self._wheel_accumulator / WHEEL_NOTCH)
+        steps = self._wheel.steps(delta)
         if steps:
-            self._wheel_accumulator -= steps * WHEEL_NOTCH
-            # Wheel up moves toward the start of the series, as a scrollbar would.
+            # Wheel up moves toward the start of the series; the slider below
+            # the image is filtered to match (see MainWindow.eventFilter).
             self.stepRequested.emit(-steps)
         event.accept()
 
@@ -195,7 +237,7 @@ class ImageCanvas(QWidget):
         super().leaveEvent(event)
 
     def _cancel_drag(self) -> None:
-        self._wheel_accumulator = 0
+        self._wheel.reset()
         self._drag_origin = None
         self._drag_current = None
         self._drag_valid = True
@@ -211,8 +253,8 @@ class ImageCanvas(QWidget):
             painter.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, self._placeholder)
             return
 
-        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        painter.drawPixmap(image_rect.toRect(), self._pixmap)
+        target = image_rect.toRect()
+        painter.drawPixmap(target.topLeft(), self._scaled_pixmap(target))
 
         # Existing boxes for this series.
         painter.setPen(QPen(COMMITTED_PEN, 1.5))

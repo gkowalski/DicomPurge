@@ -44,4 +44,5 @@ replace = '__version__ = "{new_version}"'
 [dependency-groups]
 dev = [
     "bump-my-version>=1.5.1",
+    "pytest>=9.1.1",
 ]

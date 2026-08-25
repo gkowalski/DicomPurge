@@ -99,7 +99,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, bridge: LogBridge) -> None:
         super().__init__()
-        self.setWindowTitle("Scuppernong - DICOM De-identification")
+        self.setWindowTitle("DicomPurge - DICOM De-identification")
         self.setWindowIcon(app_icon())
         self.resize(1400, 880)
 

@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 IMAGES_DIR = PROJECT_ROOT / "images"
-LOGO_PATH = IMAGES_DIR / "Scuppernong_logo_512x512.png"
+LOGO_PATH = IMAGES_DIR / "DicomPurge_logo_512x512.png"
 
 _cache: dict[int, QPixmap] = {}
 

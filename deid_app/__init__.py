@@ -1,5 +1,2 @@
-"""Scuppernong - DICOM burned-in annotation de-identification tool.
-
-Named after the Scuppernong River in Wisconsin.
-"""
+"""DicomPurge - DICOM burned-in annotation de-identification tool."""
 __version__ = "0.0.4"

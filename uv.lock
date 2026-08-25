@@ -79,7 +79,7 @@ wheels = [
 ]
 
 [[package]]
-name = "de-id-python-program"
+name = "dicompurge"
 version = "0.0.4"
 source = { editable = "." }
 dependencies = [

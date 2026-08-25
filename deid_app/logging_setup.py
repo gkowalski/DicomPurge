@@ -1,4 +1,4 @@
-"""Application-wide logging: rotating file at ~/de-id.log plus a Qt signal bridge."""
+"""Application-wide logging: rotating file at ~/dicompurge.log plus a Qt signal bridge."""
 from __future__ import annotations
 
 import logging
@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-LOG_PATH = Path(os.path.expanduser("~")) / "de-id.log"
+LOG_PATH = Path(os.path.expanduser("~")) / "dicompurge.log"
 LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -72,7 +72,7 @@ def configure_logging(level: int = logging.DEBUG) -> LogBridge:
 
 
 def truncate_log_file() -> None:
-    """Empty ~/de-id.log without losing the open handler."""
+    """Empty ~/dicompurge.log without losing the open handler."""
     handler = _file_handler
     if handler is None:
         LOG_PATH.write_text("", encoding="utf-8")

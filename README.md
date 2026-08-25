@@ -1,9 +1,7 @@
-# Scuppernong
+# DicomPurge
 
 
-<img alt="Scuppernong Logo" height="100" width="100" src="./images/Scuppernong_logo_512x512.png" />
-
-Named after the [Scuppernong River](https://en.wikipedia.org/wiki/Scuppernong_River_(Wisconsin)) in Wisconsin.
+<img alt="DicomPurge Logo" height="100" width="100" src="./images/DicomPurge_logo_512x512.png" />
 
 A DICOM De-identification tool for de-identifying burned-in annotations in DICOM images. You draw
 boxes on one image of a series, the boxes apply to every image in that series, and then 
@@ -34,8 +32,8 @@ uv venv --python 3.12 && uv sync
 | --- | --- |
 | `main.py` | Entry point; installs the logging bridge and a global exception hook |
 | `deid_app/resources.py` | Bundled images — the toolbar logo and window icon |
-| `images/` | `Scuppernong_logo_512x512.png`, shown top-left and used as the window icon |
-| `deid_app/logging_setup.py` | Root logging config: `~/de-id.log` (rotating) + Qt signal bridge |
+| `images/` | `DicomPurge_logo_512x512.png`, shown top-left and used as the window icon |
+| `deid_app/logging_setup.py` | Root logging config: `~/dicompurge.log` (rotating) + Qt signal bridge |
 | `deid_app/log_pane.py` | Log tab: level filter, colouring, auto-scroll, clear button |
 | `deid_app/metadata_pane.py` | Metadata tab: read-only DICOM tag tree for the displayed instance |
 | `deid_app/model.py` | Recursive `*.dcm` scan (worker thread) and the `Series` model |
@@ -153,7 +151,7 @@ level — set the Log tab's level filter to `DEBUG` to see where the time goes.
 | Green | `committed` | boxes locked in | allowed |
 
 Everything — selections, commits, per-file results, and exceptions — is logged to the
-**Log** tab and to `~/de-id.log`.
+**Log** tab and to `~/dicompurge.log`.
 
 ## How the redaction works
 

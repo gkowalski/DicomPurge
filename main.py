@@ -1,4 +1,4 @@
-"""Entry point for Scuppernong, the DICOM de-identification tool."""
+"""Entry point for DicomPurge, the DICOM de-identification tool."""
 from __future__ import annotations
 
 import logging
@@ -35,7 +35,7 @@ def _install_excepthook() -> None:
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("Scuppernong")
+    app.setApplicationName("DicomPurge")
     app.setOrganizationName("de-id")
     app.setWindowIcon(app_icon())
 

@@ -17,8 +17,10 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QTabWidget,
+    QTextBrowser,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -33,7 +35,8 @@ from .logging_setup import LogBridge
 from .metadata_pane import MetadataPane
 from .model import Series, start_scan
 from .resources import LOGO_PATH, app_icon, logo_pixmap
-from .render import dataset_to_qimage, frame_count, read_dataset
+from .render import dataset_to_qimage, frame_count, has_pixel_data, read_dataset
+from .sr_render import dataset_to_html, is_structured_report
 
 log = logging.getLogger(__name__)
 
@@ -199,7 +202,15 @@ class MainWindow(QMainWindow):
         self.canvas.boxAdded.connect(self._on_box_added)
         self.canvas.boxDiscarded.connect(self._on_box_discarded)
         self.canvas.stepRequested.connect(self._step_frame)
-        layout.addWidget(self.canvas, 1)
+
+        self.report_view = QTextBrowser()
+        self.report_view.setReadOnly(True)
+        self.report_view.setOpenExternalLinks(False)
+
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(self.canvas)
+        self.view_stack.addWidget(self.report_view)
+        layout.addWidget(self.view_stack, 1)
 
         slider_row = QHBoxLayout()
         slider_row.addWidget(QLabel("Image:"))
@@ -580,8 +591,23 @@ class MainWindow(QMainWindow):
         try:
             ds = self._dataset_for(instance.path)
             self._show_metadata(series, instance, ds)
-            image = dataset_to_qimage(ds, frame_index)
-            self.canvas.set_image(image)
+            if is_structured_report(ds):
+                self.report_view.setHtml(dataset_to_html(ds))
+                self.view_stack.setCurrentWidget(self.report_view)
+            elif not has_pixel_data(ds):
+                sop_uid = getattr(ds, "SOPClassUID", None)
+                sop_name = sop_uid.name if sop_uid is not None else "Unknown SOP Class"
+                log.info("No pixel data for %s (%s)", instance.path, sop_name)
+                self.canvas.set_image(None)
+                self.canvas.set_placeholder(
+                    f"Uneditable File : No Pixel Data for image {instance.path.name}\n "
+                    f"of image type '{sop_name}'"
+                )
+                self.view_stack.setCurrentWidget(self.canvas)
+            else:
+                image = dataset_to_qimage(ds, frame_index)
+                self.canvas.set_image(image)
+                self.view_stack.setCurrentWidget(self.canvas)
         except Exception as exc:  # noqa: BLE001
             log.exception("Failed to render %s: %s", instance.path, exc)
             self.canvas.set_image(None)
@@ -589,6 +615,7 @@ class MainWindow(QMainWindow):
                 f"Could not render {instance.path.name}:\n{exc}\n"
                 "(the pixel data may need pylibjpeg / gdcm)"
             )
+            self.view_stack.setCurrentWidget(self.canvas)
 
         self.frame_label.setText(f"{position + 1} / {len(self._frames)}")
         self.header_label.setText(

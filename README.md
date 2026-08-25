@@ -1,5 +1,8 @@
 # Scuppernong
 
+
+<img alt="Scuppernong Logo" height="100" width="100" src="./images/Scuppernong_logo_512x512.png" />
+
 Named after the Scuppernong River in Wisconsin.
 
 A PySide6 tool for de-identifying burned-in annotations in DICOM images. You draw

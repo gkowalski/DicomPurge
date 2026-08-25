@@ -51,6 +51,13 @@ def read_dataset(path) -> pydicom.Dataset:
     return pydicom.dcmread(str(path))
 
 
+PIXEL_DATA_TAGS = ("PixelData", "FloatPixelData", "DoubleFloatPixelData")
+
+
+def has_pixel_data(ds) -> bool:
+    return any(hasattr(ds, tag) for tag in PIXEL_DATA_TAGS)
+
+
 def overlay_masks(ds, frame_index: int, rows: int, columns: int):
     """Every overlay plane that lands on this image frame, as image-grid masks.
 

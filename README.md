@@ -42,10 +42,12 @@ uv venv --python 3.12 && uv sync
 | `deid_app/render.py` | DICOM instance → `QImage` (modality LUT, VOI LUT, MONOCHROME1 inversion); `has_pixel_data()` detects pixel-free instances |
 | `deid_app/sr_render.py` | Detects Structured Report–family instances and renders their `ContentSequence` as read-only HTML |
 | `deid_app/image_view.py` | Image canvas and rubber-band box selection |
+| `deid_app/frame_worker.py` | Frame rendering off the GUI thread: the render worker the display waits on, and the prefetch worker that renders ahead of the scroll |
+| `deid_app/decode_cache.py` | The two thread-safe LRU caches those workers share — decoded datasets, and rendered frames bounded by count *and* bytes |
 | `deid_app/redaction.py` | The de-identification itself — pixel data and overlays |
 | `deid_app/export.py` | Export worker: mirrors the input tree into the output tree |
 | `deid_app/main_window.py` | Window assembly, tree, tabs, wiring |
-| `tests/` | Fixture generator and four headless test scripts |
+| `tests/` | Fixture generator, five headless GUI scripts, and two pytest-style unit modules |
 
 ## Workflow
 
@@ -53,19 +55,25 @@ uv venv --python 3.12 && uv sync
    directories) or via **Browse…**. Nothing happens until you do.
 2. The tree fills with `Patient → Study → Series`. Only **series** nodes are selectable;
    patient and study nodes are display-only.
-3. Selecting a series renders its first image in the **Image review** tab. The slider at
-   the bottom cycles through every image in the series (multi-frame instances contribute
-   one slider position per frame). **Scrolling the mouse wheel over the image** does the
-   same thing — wheel up moves toward the start of the series, wheel down toward the end,
-   and it stops at either end rather than wrapping. Trackpad deltas accumulate, so one
-   notch-equivalent of scrolling advances exactly one image. The wheel is ignored while
-   you are mid-drag on a redaction box.
+3. Selecting a series renders its first image in the **Image review** tab. A modal
+   **Loading series** popup covers the wait — it counts through the instance headers, then
+   shows an indeterminate bar while the first image is decoded, and closes as soon as that
+   image (or its placeholder) is on screen. A series that loads in under 300 ms never
+   shows it. The slider at the bottom cycles through every image in the series
+   (multi-frame instances contribute one slider position per frame). **Scrolling the mouse
+   wheel** does the same thing, over the image *and* over the slider — wheel up moves
+   toward the start of the series, wheel down toward the end, and it stops at either end
+   rather than wrapping. Trackpad deltas accumulate, so one notch-equivalent of scrolling
+   advances exactly one image. The wheel is ignored while you are mid-drag on a redaction
+   box.
 4. The **Metadata** tab shows the DICOM tags of whichever instance is on screen —
    *Field Name / Tag / VR / Size / Content*, with the `(0002,xxxx)` file meta group
    in grey (toggle it off with the **File meta** checkbox). Sequences expand into
    `Item n` sub-trees, multi-valued elements expand into one `value` row each, and
    binary elements (pixel data, overlays) show their size instead of their bytes.
    The **Filter** box narrows the tree to rows whose name, tag or content match.
+   Building that tree is expensive, so it is rebuilt once the scrolling settles rather
+   than for every image you pass — switching to the tab builds it immediately.
    It is read-only: nothing here is edited or exported. Note this app redacts pixels
    and overlays only — the tags shown are **not** de-identified on export.
 5. **Drag on the image** to place a redaction box. While dragging, releasing inside the
@@ -110,6 +118,30 @@ cases it might encounter instead of crashing:
 Series containing these instances still go through the normal review/commit workflow
 (status colors, export) even though there is nothing to redact on that particular
 instance.
+
+### Scrolling performance
+
+Decoding a DICOM frame is far too slow to do while someone scrolls, so nothing that
+touches pixel data happens on the GUI thread:
+
+- **Two worker threads.** One renders the frame the display is waiting on; the other
+  renders frames *ahead of* the scroll (6 positions in the direction of travel, 2 behind).
+  Both run the same render path, so a prefetched frame is exactly what the display would
+  otherwise have waited for.
+- **Two caches**, shared by both workers: decoded datasets, and finished frames keyed by
+  `(file, frame)`. A frame that is already rendered — revisited, or fetched ahead — is
+  painted immediately with no worker round-trip at all. The frame cache is bounded by
+  entry count and by total bytes (counting the dataset each entry keeps alive), so a
+  series of large radiographs cannot grow it without limit.
+- **Stale work is dropped, not decoded.** Prefetch requests from an abandoned series, or
+  for positions a fast scrub has already passed, are discarded when the worker reaches
+  them; and a slow render that finishes after you have moved on never paints over the
+  image you are actually looking at.
+- The **Metadata** tab and the scaled on-screen pixmap are both rebuilt only when they
+  actually change, keeping per-image work on the GUI thread down to the paint itself.
+
+Per-frame timings (dataset read, render, metadata build, display) are logged at **debug**
+level — set the Log tab's level filter to `DEBUG` to see where the time goes.
 
 ### Series status
 
@@ -157,7 +189,15 @@ de-identification step if you need PS3.15 Annex E conformance.
 uv run python tests/make_fixtures.py /tmp/fixtures   # synthetic mono / RGB multiframe / JPEG + overlays
 uv run python tests/test_redaction.py                # verifies pixels + overlay bits are zeroed
 QT_QPA_PLATFORM=offscreen uv run python tests/test_gui_smoke.py
+QT_QPA_PLATFORM=offscreen uv run python tests/test_metadata_pane.py
+QT_QPA_PLATFORM=offscreen uv run python tests/test_commit_shortcut.py
+uv run python tests/test_overlay_display.py
 ```
+
+Each of those is a standalone script that prints `PASS`/`FAIL` per check and exits
+non-zero on failure. `tests/test_render.py` and `tests/test_sr_render.py` are plain
+pytest-style modules of unit tests instead.
+
 ## Credits
 - Developed by the **CTSI of SE WI**
 - If you utilize CTSI resources, please cite the **NIH CTSA; 2UL1TR001436, 2TL1TR001437, 2KL2TR001438** and acknowledge support.

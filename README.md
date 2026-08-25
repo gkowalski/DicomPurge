@@ -3,11 +3,11 @@
 
 <img alt="Scuppernong Logo" height="100" width="100" src="./images/Scuppernong_logo_512x512.png" />
 
-Named after the Scuppernong River in Wisconsin.
+Named after the [Scuppernong River](https://en.wikipedia.org/wiki/Scuppernong_River_(Wisconsin)) in Wisconsin.
 
-A PySide6 tool for de-identifying burned-in annotations in DICOM images. You draw
-boxes on one image of a series, the boxes apply to every image in that series, and
-the export mirrors the input directory structure into an output directory.
+A DICOM De-identification tool for de-identifying burned-in annotations in DICOM images. You draw
+boxes on one image of a series, the boxes apply to every image in that series, and then 
+  export those files to an output directory with the same structure.
 
 ## Running
 

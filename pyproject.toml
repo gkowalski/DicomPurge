@@ -1,7 +1,7 @@
 [project]
 name = "de-id-python-program"
 version = "0.0.3"
-description = "Scuppernong - PySide6 tool for de-identifying burned-in annotations in DICOM images"
+description = "Scuppernong - DICOM Deidentification ( PySide6 ) tool for de-identifying burned-in annotations in DICOM images"
 requires-python = ">=3.11,<3.15"
 dependencies = [
     "PySide6>=6.6",
@@ -17,4 +17,31 @@ dependencies = [
 de-id = "main:main"
 
 [tool.uv]
-package = false
+package = true
+
+[tool.setuptools.packages.find]
+include = ["deid_app*"] # ✅ Prevents the 'images' folder build error
+
+
+[tool.bumpversion]
+current_version = "0.0.3"
+parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
+serialize = ["{major}.{minor}.{patch}"]
+search = "{current_version}"
+replace = "{new_version}"
+regex = false
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "deid_app/__init__.py"  # Change to your actual package path
+search = '__version__ = "{current_version}"'
+replace = '__version__ = "{new_version}"'
+
+[dependency-groups]
+dev = [
+    "bump-my-version>=1.5.1",
+]

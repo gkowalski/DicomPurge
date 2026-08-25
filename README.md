@@ -39,7 +39,8 @@ uv venv --python 3.12 && uv sync
 | `deid_app/log_pane.py` | Log tab: level filter, colouring, auto-scroll, clear button |
 | `deid_app/metadata_pane.py` | Metadata tab: read-only DICOM tag tree for the displayed instance |
 | `deid_app/model.py` | Recursive `*.dcm` scan (worker thread) and the `Series` model |
-| `deid_app/render.py` | DICOM instance → `QImage` (modality LUT, VOI LUT, MONOCHROME1 inversion) |
+| `deid_app/render.py` | DICOM instance → `QImage` (modality LUT, VOI LUT, MONOCHROME1 inversion); `has_pixel_data()` detects pixel-free instances |
+| `deid_app/sr_render.py` | Detects Structured Report–family instances and renders their `ContentSequence` as read-only HTML |
 | `deid_app/image_view.py` | Image canvas and rubber-band box selection |
 | `deid_app/redaction.py` | The de-identification itself — pixel data and overlays |
 | `deid_app/export.py` | Export worker: mirrors the input tree into the output tree |
@@ -87,6 +88,28 @@ uv venv --python 3.12 && uv sync
    uncommitted boxes (*pending*) blocks the export until you commit it; a *clean* series
    blocks it until you look at it. Export then prompts for an output directory and writes
    each file to the same relative path underneath it.
+
+### Non-pixel-data DICOM files
+
+Not every DICOM instance carries pixel data, and the **Image review** tab handles both
+cases it might encounter instead of crashing:
+
+- **Structured Reports** (Basic Text/Enhanced/Comprehensive/Comprehensive 3D/Extensible
+  SR, Key Object Selection, CAD SR variants, radiation-dose SR variants, and related
+  report-only SOP Classes — the full list lives in `deid_app/sr_render.py`) have no
+  pixel data at all; their content is a nested `ContentSequence` of text/code/numeric
+  items. These render as a **read-only HTML report** in the image pane in place of the
+  canvas — there is nothing to drag a redaction box onto, and the report cannot be
+  edited.
+- **Any other pixel-data-free instance** — Encapsulated PDF/CDA/STL, Presentation States
+  (GSPS/CSPS), Waveform Storage, RT Structure Set/Plan, Registration objects, Real World
+  Value Mapping, etc. — shows a placeholder instead of the missing image:
+  `Uneditable Image : No Pixel Data for image {filename} of image type {SOP Class name}`.
+  This is expected and logged at info level, not treated as an error.
+
+Series containing these instances still go through the normal review/commit workflow
+(status colors, export) even though there is nothing to redact on that particular
+instance.
 
 ### Series status
 

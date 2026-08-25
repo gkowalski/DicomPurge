@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import (
     QCoreApplication,
     QEvent,
+    QEventLoop,
     QSettings,
     Qt,
     QThread,
@@ -124,6 +125,10 @@ class MainWindow(QMainWindow):
         # Modal "loading series" popup, alive from the click on a series until
         # its first frame is on screen. None whenever nothing is loading.
         self._load_dialog: QProgressDialog | None = None
+        # Set while _select_series runs, so a stray re-entrant call (from a
+        # processEvents somewhere inside the load) cannot interleave two loads
+        # and leave _frames belonging to the series that was abandoned.
+        self._loading = False
         # Notch accumulation for wheel events over the frame slider.
         self._slider_wheel = WheelAccumulator()
         # Metadata tab is rebuilt lazily: this holds what it *should* show, and
@@ -620,6 +625,19 @@ class MainWindow(QMainWindow):
 
     # -- series display --------------------------------------------------
     def _select_series(self, series: Series) -> None:
+        if self._loading:
+            log.debug(
+                "Ignoring re-entrant selection of %s while a load is running",
+                series.series_description or series.series_uid,
+            )
+            return
+        self._loading = True
+        try:
+            self._load_series(series)
+        finally:
+            self._loading = False
+
+    def _load_series(self, series: Series) -> None:
         self.current_series = series
         self._render_epoch += 1
         log.info(
@@ -697,7 +715,7 @@ class MainWindow(QMainWindow):
             return
         dialog.show()
         dialog.raise_()
-        QCoreApplication.processEvents()
+        QCoreApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
     def _update_load_dialog(self, text: str, value: int | None = None) -> None:
         dialog = self._load_dialog
@@ -708,7 +726,12 @@ class MainWindow(QMainWindow):
             dialog.setRange(0, 0)  # indeterminate
         else:
             dialog.setValue(value)
-        QCoreApplication.processEvents()
+        # Input is excluded deliberately: the dialog is still hidden for the
+        # first 300 ms, and window modality only blocks input once a dialog is
+        # visible - so a plain processEvents() here lets a second click re-enter
+        # _select_series from inside the header scan. Paints and timers, which
+        # are what the popup needs, still run.
+        QCoreApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
     def _close_load_dialog(self) -> None:
         dialog = self._load_dialog
@@ -789,10 +812,6 @@ class MainWindow(QMainWindow):
         self._render_inflight = False
         stale = self._render_target is not None and result.position != self._render_target
         if result.epoch == self._render_epoch and not stale:
-            # Whatever came back - image, report, no-pixel or error - the load
-            # this popup was covering is over. A stale epoch means a newer
-            # selection owns the current dialog, so leave it alone.
-            self._close_load_dialog()
             self._apply_frame_result(result)
         if self._render_pending is not None:
             pending = self._render_pending
@@ -801,6 +820,11 @@ class MainWindow(QMainWindow):
             self.renderRequested.emit(pending)
 
     def _apply_frame_result(self, result: FrameRenderResult) -> None:
+        # Whatever came back - image, report, no-pixel or error - the load the
+        # popup was covering is over. This is the one place both routes meet:
+        # a worker result, and a cached frame applied straight from
+        # _request_frame without any worker involved.
+        self._close_load_dialog()
         series = self.current_series
         if series is None:
             return

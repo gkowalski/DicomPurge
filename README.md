@@ -45,7 +45,7 @@ uv venv --python 3.12 && uv sync
 | `deid_app/redaction.py` | The de-identification itself — pixel data and overlays |
 | `deid_app/export.py` | Export worker: mirrors the input tree into the output tree |
 | `deid_app/main_window.py` | Window assembly, tree, tabs, wiring |
-| `tests/` | Fixture generator, five headless GUI scripts, and two pytest-style unit modules |
+| `tests/` | Fixture generator, six headless GUI scripts, and two pytest-style unit modules |
 
 ## Workflow
 
@@ -189,6 +189,7 @@ uv run python tests/test_redaction.py                # verifies pixels + overlay
 QT_QPA_PLATFORM=offscreen uv run python tests/test_gui_smoke.py
 QT_QPA_PLATFORM=offscreen uv run python tests/test_metadata_pane.py
 QT_QPA_PLATFORM=offscreen uv run python tests/test_commit_shortcut.py
+QT_QPA_PLATFORM=offscreen uv run python tests/test_load_dialog.py   # popup never outlives a load
 uv run python tests/test_overlay_display.py
 ```
 

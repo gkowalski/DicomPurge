@@ -9,6 +9,7 @@ from PySide6.QtCore import (
     QCoreApplication,
     QEvent,
     QEventLoop,
+    QMetaObject,
     QSettings,
     Qt,
     QThread,
@@ -43,7 +44,7 @@ from PySide6.QtWidgets import (
 
 from .app_settings import AppSettings
 from .decode_cache import DatasetCache, FrameCache
-from .dialogs import AboutDialog, SettingsDialog
+from .dialogs import AboutDialog, SettingsDialog, XnatSettingsDialog
 from .export import start_export
 from .frame_worker import (
     FrameRenderRequest,
@@ -59,6 +60,8 @@ from .metadata_pane import MetadataPane
 from .model import Series, start_scan
 from .resources import LOGO_PATH, app_icon, logo_pixmap
 from .render import frame_count, read_dataset_header
+from .xnat_settings import XnatSettings
+from .xnat_worker import XnatWorker
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +100,8 @@ def _status_icon(status: str) -> QIcon:
 class MainWindow(QMainWindow):
     renderRequested = Signal(object)
     prefetchRequested = Signal(object)
+    xnatLoginRequested = Signal(object)
+    xnatLogoutRequested = Signal()
 
     def __init__(self, bridge: LogBridge) -> None:
         super().__init__()
@@ -106,6 +111,7 @@ class MainWindow(QMainWindow):
 
         self.settings = QSettings("de-id", "dicom-deid")
         self.app_settings = AppSettings.load(self.settings)
+        self.xnat_settings = XnatSettings.load(self.settings)
         self.series_map: dict[str, Series] = {}
         self.series_items: dict[str, QTreeWidgetItem] = {}
         self.current_series: Series | None = None
@@ -176,6 +182,13 @@ class MainWindow(QMainWindow):
         self._scan_worker = None
         self._export_thread = None
         self._export_worker = None
+        # Built lazily on the first login attempt: a user who never logs in
+        # should not pay for an idle thread.
+        self._xnat_thread: QThread | None = None
+        self._xnat_worker: XnatWorker | None = None
+        # Username the server confirmed, or None when not logged in.
+        self._xnat_user: str | None = None
+        self._xnat_busy = False
 
         self._build_ui(bridge)
         self._load_recent_dirs()
@@ -215,6 +228,11 @@ class MainWindow(QMainWindow):
         top.addWidget(self.rescan_button)
 
         top.addStretch(1)
+        self.xnat_login_button = QPushButton("XNAT Login")
+        self.xnat_login_button.setEnabled(False)
+        self.xnat_login_button.clicked.connect(self.xnat_login)
+        top.addWidget(self.xnat_login_button)
+
         self.export_button = QPushButton("Export de-identified files...")
         self.export_button.clicked.connect(self.export)
         top.addWidget(self.export_button)
@@ -288,6 +306,26 @@ class MainWindow(QMainWindow):
         self.settings_action.triggered.connect(self.show_settings)
         file_menu.addAction(self.settings_action)
 
+        # A menu of its own, as asked for. NoRole is load-bearing on macOS:
+        # Qt's text heuristic hoists actions that look like About/Preferences
+        # into the application menu - which is exactly what about_action and
+        # settings_action above rely on - and without NoRole these would be
+        # hoisted too and vanish from this menu.
+        xnat_menu = self.menuBar().addMenu("XNAT Settings")
+
+        self.xnat_settings_action = QAction("Server and Credentials...", self)
+        self.xnat_settings_action.setMenuRole(QAction.MenuRole.NoRole)
+        self.xnat_settings_action.setStatusTip("XNAT server URL, user ID and password")
+        self.xnat_settings_action.triggered.connect(self.show_xnat_settings)
+        xnat_menu.addAction(self.xnat_settings_action)
+
+        self.xnat_logout_action = QAction("Log Out", self)
+        self.xnat_logout_action.setMenuRole(QAction.MenuRole.NoRole)
+        self.xnat_logout_action.setStatusTip("Close the current XNAT session")
+        self.xnat_logout_action.setEnabled(False)
+        self.xnat_logout_action.triggered.connect(self.xnat_logout)
+        xnat_menu.addAction(self.xnat_logout_action)
+
     # -- menu actions ----------------------------------------------------
     def show_about(self) -> None:
         AboutDialog(self).exec()
@@ -325,6 +363,111 @@ class MainWindow(QMainWindow):
             values.frame_cache_mb,
             values.dataset_cache_entries,
         )
+
+    # -- XNAT ------------------------------------------------------------
+    def show_xnat_settings(self) -> None:
+        dialog = XnatSettingsDialog(self.xnat_settings, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        values = dialog.values
+        # A session opened as someone else, or against another server, is not
+        # the session these settings describe any more.
+        identity_changed = (values.server, values.user) != (
+            self.xnat_settings.server,
+            self.xnat_settings.user,
+        )
+        self.xnat_settings = values
+        values.save(self.settings)
+        if identity_changed and self._xnat_user is not None:
+            log.info("XNAT server or user changed; logging out")
+            self.xnat_logout()
+        self._update_xnat_button()
+
+    def _ensure_xnat_thread(self) -> None:
+        """Start the XNAT thread on first use and wire it up."""
+        if self._xnat_thread is not None:
+            return
+        self._xnat_thread = QThread()
+        self._xnat_worker = XnatWorker()
+        self._xnat_worker.moveToThread(self._xnat_thread)
+        self.xnatLoginRequested.connect(self._xnat_worker.login)
+        self.xnatLogoutRequested.connect(self._xnat_worker.logout)
+        self._xnat_worker.loggedIn.connect(self._on_xnat_logged_in)
+        self._xnat_worker.loginFailed.connect(self._on_xnat_login_failed)
+        self._xnat_worker.loggedOut.connect(self._on_xnat_logged_out)
+        self._xnat_thread.start()
+
+    def xnat_login(self) -> None:
+        if not self.xnat_settings.is_complete or self._xnat_busy:
+            return
+        self._ensure_xnat_thread()
+        self._xnat_busy = True
+        self._update_xnat_button()
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+        self.statusBar().showMessage(f"Connecting to {self.xnat_settings.server}...")
+        self.xnatLoginRequested.emit(self.xnat_settings)
+
+    def xnat_logout(self) -> None:
+        if self._xnat_user is None:
+            return
+        self.xnatLogoutRequested.emit()
+
+    @Slot(str)
+    def _on_xnat_logged_in(self, user: str) -> None:
+        self._xnat_user = user
+        self._xnat_busy = False
+        self.progress.setVisible(False)
+        self.statusBar().showMessage(f"Logged in to XNAT as {user}")
+        self._update_xnat_button()
+
+    @Slot(str)
+    def _on_xnat_login_failed(self, message: str) -> None:
+        self._xnat_user = None
+        self._xnat_busy = False
+        self.progress.setVisible(False)
+        self.statusBar().showMessage("XNAT login failed")
+        self._update_xnat_button()
+        QMessageBox.critical(self, "XNAT login failed", message)
+
+    @Slot()
+    def _on_xnat_logged_out(self) -> None:
+        self._xnat_user = None
+        self._xnat_busy = False
+        self.statusBar().showMessage("Logged out of XNAT")
+        self._update_xnat_button()
+
+    def _update_xnat_button(self) -> None:
+        """Login needs both a complete configuration and a loaded directory."""
+        have_images = bool(self.series_map)
+        configured = self.xnat_settings.is_complete
+        logged_in = self._xnat_user is not None
+
+        self.xnat_login_button.setEnabled(
+            configured and have_images and not logged_in and not self._xnat_busy
+        )
+        self.xnat_logout_action.setEnabled(logged_in and not self._xnat_busy)
+
+        if logged_in:
+            self.xnat_login_button.setText(f"Logged in as {self._xnat_user}")
+            self.xnat_login_button.setToolTip(
+                f"Connected to {self.xnat_settings.server}"
+            )
+            return
+
+        self.xnat_login_button.setText("XNAT Login")
+        # A greyed-out button should never leave the user guessing why.
+        if not configured:
+            tip = ("Set the XNAT server, user ID and password under the "
+                   "XNAT Settings menu.")
+        elif not have_images:
+            tip = "Load an input directory first."
+        elif self._xnat_busy:
+            tip = "Connecting..."
+        else:
+            tip = (f"Connect to {self.xnat_settings.server} as "
+                   f"{self.xnat_settings.user}")
+        self.xnat_login_button.setToolTip(tip)
 
     def _build_shortcuts(self) -> None:
         """Cmd+S (Ctrl+S off macOS) commits the series being reviewed."""
@@ -542,6 +685,7 @@ class MainWindow(QMainWindow):
         self.reset_button.setEnabled(False)
         self.commit_button.setEnabled(False)
         self.boxes_label.setText("0 box(es)")
+        self._update_xnat_button()
 
     def _populate_tree(self) -> None:
         self.tree.clear()
@@ -1146,6 +1290,7 @@ class MainWindow(QMainWindow):
             self.export_button.setText(
                 f"Export de-identified files... ({remaining} series not ready)"
             )
+        self._update_xnat_button()
 
     # -- export ----------------------------------------------------------
     def export(self) -> None:
@@ -1255,6 +1400,17 @@ class MainWindow(QMainWindow):
         if self._prefetch_thread.isRunning():
             self._prefetch_thread.quit()
             self._prefetch_thread.wait(3000)
+        if self._xnat_thread is not None and self._xnat_thread.isRunning():
+            # Blocking rather than a plain emit: a queued logout races quit()
+            # and loses, leaving DELETE /data/JSESSION unsent and the server
+            # session to expire on its own. This waits for disconnect() to
+            # finish on the worker thread, which is bounded by its own timeout.
+            if self._xnat_worker is not None and self._xnat_worker.connected:
+                QMetaObject.invokeMethod(
+                    self._xnat_worker, "logout", Qt.BlockingQueuedConnection
+                )
+            self._xnat_thread.quit()
+            self._xnat_thread.wait(3000)
         log.info("Application closing")
         super().closeEvent(event)
 

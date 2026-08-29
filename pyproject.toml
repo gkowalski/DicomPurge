@@ -12,6 +12,7 @@ dependencies = [
     "pylibjpeg-openjpeg>=2.1",
     "pillow>=10.0",
     "click>=8.4.2",
+    "xnat>=0.8",
 ]
 
 [project.scripts]

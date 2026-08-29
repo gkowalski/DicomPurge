@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLayout,
+    QLineEdit,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -25,6 +26,7 @@ from . import __version__
 from .app_settings import LOG_LEVELS, AppSettings
 from .logging_setup import LOG_PATH
 from .resources import logo_pixmap
+from .xnat_settings import PASSWORD_WARNING, XnatSettings
 
 log = logging.getLogger(__name__)
 
@@ -200,3 +202,62 @@ class SettingsDialog(QDialog):
     @property
     def clear_recent_requested(self) -> bool:
         return self.clear_recent_check.isChecked()
+
+
+class XnatSettingsDialog(QDialog):
+    """Edits XNAT credentials; read `values` after exec() returns Accepted."""
+
+    def __init__(self, current: XnatSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("XNAT Server and Credentials")
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+
+        server_box = QGroupBox("XNAT server")
+        form = QFormLayout(server_box)
+
+        self.server_edit = QLineEdit(current.server)
+        self.server_edit.setPlaceholderText("https://xnat.example.org/xnat")
+        self.server_edit.setToolTip(
+            "Base URL of the XNAT server. A bare hostname is assumed to be https."
+        )
+        self.server_edit.setMinimumWidth(360)
+
+        self.user_edit = QLineEdit(current.user)
+        self.user_edit.setToolTip("Your XNAT username.")
+
+        self.password_edit = QLineEdit(current.password)
+        self.password_edit.setEchoMode(QLineEdit.Password)
+
+        form.addRow("Server URL:", self.server_edit)
+        form.addRow("User ID:", self.user_edit)
+        form.addRow("Password:", self.password_edit)
+        layout.addWidget(server_box)
+
+        warning = QLabel(PASSWORD_WARNING)
+        warning.setWordWrap(True)
+        warning.setStyleSheet("color: palette(mid);")
+        layout.addWidget(warning)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+        # OK stays disabled until all three fields are filled, so an incomplete
+        # configuration can never be saved and then fail confusingly at login.
+        for edit in (self.server_edit, self.user_edit, self.password_edit):
+            edit.textChanged.connect(self._update_ok)
+        self._update_ok()
+
+    def _update_ok(self) -> None:
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(self.values.is_complete)
+
+    @property
+    def values(self) -> XnatSettings:
+        return XnatSettings(
+            server=XnatSettings.normalise_server(self.server_edit.text()),
+            user=self.user_edit.text().strip(),
+            password=self.password_edit.text(),
+        )

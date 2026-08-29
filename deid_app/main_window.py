@@ -19,6 +19,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
     QMenu,
     QFileDialog,
     QHBoxLayout,
@@ -40,7 +41,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
 )
 
+from .app_settings import AppSettings
 from .decode_cache import DatasetCache, FrameCache
+from .dialogs import AboutDialog, SettingsDialog
 from .export import start_export
 from .frame_worker import (
     FrameRenderRequest,
@@ -60,11 +63,8 @@ from .render import frame_count, read_dataset_header
 log = logging.getLogger(__name__)
 
 SERIES_UID_ROLE = Qt.UserRole + 1
-# How far the prefetcher runs ahead of / behind the frame on screen. Ahead is
-# deeper because a scroll keeps going the way it started; behind covers the
-# small back-step people make after overshooting.
-PREFETCH_AHEAD = 6
-PREFETCH_BEHIND = 2
+# How far the prefetcher runs ahead of / behind the frame on screen now lives in
+# AppSettings, where the user can tune it; see AppSettings.prefetch_ahead.
 # How long the scroll has to settle before the Metadata tab is rebuilt.
 METADATA_DEBOUNCE_MS = 250
 STATUS_COLORS = {
@@ -105,6 +105,7 @@ class MainWindow(QMainWindow):
         self.resize(1400, 880)
 
         self.settings = QSettings("de-id", "dicom-deid")
+        self.app_settings = AppSettings.load(self.settings)
         self.series_map: dict[str, Series] = {}
         self.series_items: dict[str, QTreeWidgetItem] = {}
         self.current_series: Series | None = None
@@ -142,8 +143,13 @@ class MainWindow(QMainWindow):
         # Decoded datasets and rendered frames, shared with both workers. The
         # frame cache is what makes a re-visited image appear instantly; the
         # dataset cache mostly serves multi-frame instances.
-        self._dataset_cache = DatasetCache(capacity=12)
-        self._frame_cache = FrameCache(capacity=64)
+        self._dataset_cache = DatasetCache(
+            capacity=self.app_settings.dataset_cache_entries
+        )
+        self._frame_cache = FrameCache(
+            capacity=self.app_settings.frame_cache_entries,
+            max_bytes=self.app_settings.frame_cache_mb * 1024 * 1024,
+        )
         # Position the user is actually on. A worker result for anything else
         # is stale - it can be outrun by a cache hit displayed while it was
         # still decoding - and must not be painted over the current image.
@@ -235,6 +241,7 @@ class MainWindow(QMainWindow):
         self.metadata_pane = MetadataPane()
         self.tabs.addTab(self.metadata_pane, "Metadata")
         self.log_pane = LogPane(bridge)
+        self.log_pane.set_min_level(self.app_settings.gui_log_level)
         self.tabs.addTab(self.log_pane, "Log")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         splitter.addWidget(self.tabs)
@@ -245,6 +252,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(splitter, 1)
 
         self.setCentralWidget(central)
+        self._build_menu_bar()
         self._build_shortcuts()
 
         status = QStatusBar()
@@ -254,6 +262,69 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(self.progress)
         self.setStatusBar(status)
         status.showMessage("Idle")
+
+    def _build_menu_bar(self) -> None:
+        """The application menu bar.
+
+        About and Settings carry explicit menu roles, so on macOS Qt lifts them
+        out of this File menu and into the application menu (where Settings also
+        picks up the standard Cmd+, ). Elsewhere they stay under File. That
+        leaves File empty on macOS until other commands move into it.
+        """
+        file_menu = self.menuBar().addMenu("&File")
+
+        self.about_action = QAction("About DicomPurge", self)
+        self.about_action.setMenuRole(QAction.MenuRole.AboutRole)
+        self.about_action.setStatusTip("Version and environment details")
+        self.about_action.triggered.connect(self.show_about)
+        file_menu.addAction(self.about_action)
+
+        self.settings_action = QAction("Settings...", self)
+        self.settings_action.setMenuRole(QAction.MenuRole.PreferencesRole)
+        # Qt ships no standard binding for Preferences on any platform here, so
+        # set it explicitly: portable "Ctrl" becomes Cmd on macOS.
+        self.settings_action.setShortcut(QKeySequence("Ctrl+,"))
+        self.settings_action.setStatusTip("Performance, logging and history options")
+        self.settings_action.triggered.connect(self.show_settings)
+        file_menu.addAction(self.settings_action)
+
+    # -- menu actions ----------------------------------------------------
+    def show_about(self) -> None:
+        AboutDialog(self).exec()
+
+    def show_settings(self) -> None:
+        dialog = SettingsDialog(self.app_settings, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        if dialog.clear_recent_requested:
+            self.settings.remove("recent_dirs")
+            self._load_recent_dirs()
+            log.info("Recent input directories cleared")
+        values = dialog.values
+        values.save(self.settings)
+        self._apply_settings(values)
+
+    def _apply_settings(self, values: AppSettings) -> None:
+        """Push edited settings onto the live objects that read them.
+
+        Prefetch depth needs nothing here - _prefetch_neighbors reads it fresh
+        on every call.
+        """
+        self.app_settings = values
+        self._dataset_cache.set_capacity(values.dataset_cache_entries)
+        self._frame_cache.set_limits(
+            values.frame_cache_entries, values.frame_cache_mb * 1024 * 1024
+        )
+        self.log_pane.set_min_level(values.gui_log_level)
+        log.info(
+            "Settings applied: prefetch %d ahead / %d behind, frame cache %d frames "
+            "or %d MB, dataset cache %d files",
+            values.prefetch_ahead,
+            values.prefetch_behind,
+            values.frame_cache_entries,
+            values.frame_cache_mb,
+            values.dataset_cache_entries,
+        )
 
     def _build_shortcuts(self) -> None:
         """Cmd+S (Ctrl+S off macOS) commits the series being reviewed."""
@@ -888,8 +959,8 @@ class MainWindow(QMainWindow):
         # fast scrub has already left behind.
         self._prefetch_worker.set_focus(position)
 
-        offsets = [o for o in range(1, PREFETCH_AHEAD + 1)]
-        offsets += [-o for o in range(1, PREFETCH_BEHIND + 1)]
+        offsets = [o for o in range(1, self.app_settings.prefetch_ahead + 1)]
+        offsets += [-o for o in range(1, self.app_settings.prefetch_behind + 1)]
         if not forward:
             offsets = [-o for o in offsets]
 

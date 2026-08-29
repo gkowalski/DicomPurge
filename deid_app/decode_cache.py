@@ -29,6 +29,13 @@ class DatasetCache:
             while len(self._entries) > self._capacity:
                 self._entries.popitem(last=False)
 
+    def set_capacity(self, capacity: int) -> None:
+        """Resize, evicting straight away rather than at the next put."""
+        with self._lock:
+            self._capacity = max(1, capacity)
+            while len(self._entries) > self._capacity:
+                self._entries.popitem(last=False)
+
     def __contains__(self, path: Path) -> bool:
         with self._lock:
             return path in self._entries
@@ -75,11 +82,22 @@ class FrameCache:
             self._sizes[key] = size
             self._bytes += size
             self._entries.move_to_end(key)
-            while self._entries and (
-                len(self._entries) > self._capacity or self._bytes > self._max_bytes
-            ):
-                oldest, _ = self._entries.popitem(last=False)
-                self._bytes -= self._sizes.pop(oldest, 0)
+            self._evict_locked()
+
+    def set_limits(self, capacity: int, max_bytes: int) -> None:
+        """Resize, evicting straight away rather than at the next put."""
+        with self._lock:
+            self._capacity = max(1, capacity)
+            self._max_bytes = max(1, max_bytes)
+            self._evict_locked()
+
+    def _evict_locked(self) -> None:
+        """Drop least-recently-used frames until both limits hold. Caller holds the lock."""
+        while self._entries and (
+            len(self._entries) > self._capacity or self._bytes > self._max_bytes
+        ):
+            oldest, _ = self._entries.popitem(last=False)
+            self._bytes -= self._sizes.pop(oldest, 0)
 
     def has(self, path: Path, frame_index: int) -> bool:
         with self._lock:

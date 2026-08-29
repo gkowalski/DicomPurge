@@ -99,6 +99,22 @@ class LogPane(QWidget):
                 self.view.verticalScrollBar().maximum()
             )
 
+    def set_min_level(self, level: int) -> None:
+        """Apply a minimum level chosen outside this pane (the Settings dialog).
+
+        Moves the combo to match so the pane keeps telling the truth about what
+        it is filtering on, without re-entering _on_level_changed.
+        """
+        index = self.level_box.findData(level)
+        if index < 0:
+            return
+        self.level_box.blockSignals(True)
+        self.level_box.setCurrentIndex(index)
+        self.level_box.blockSignals(False)
+        if level != self._min_level:
+            self._min_level = level
+            self._rerender()
+
     def _on_level_changed(self) -> None:
         self._min_level = int(self.level_box.currentData())
         self._rerender()

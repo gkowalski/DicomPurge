@@ -7,6 +7,7 @@ import traceback
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from deid_app import APP_NAME
 from deid_app.logging_setup import configure_logging
 from deid_app.main_window import MainWindow
 from deid_app.resources import app_icon
@@ -34,8 +35,12 @@ def _install_excepthook() -> None:
 
 
 def main() -> int:
-    app = QApplication(sys.argv)
-    app.setApplicationName("DicomPurge")
+    # macOS builds the application menu ("About X", "Hide X", "Quit X") from
+    # arguments()[0], not from setApplicationName, so argv[0] has to carry the
+    # product name - otherwise the menu reads "About main.py". Real arguments
+    # are kept so Qt still honours -style, -platform and friends.
+    app = QApplication([APP_NAME] + sys.argv[1:])
+    app.setApplicationName(APP_NAME)
     app.setOrganizationName("de-id")
     app.setWindowIcon(app_icon())
 

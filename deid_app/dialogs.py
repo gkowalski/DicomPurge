@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -82,6 +83,12 @@ class AboutDialog(QDialog):
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
+
+        # Everything here is fixed-size content, so let the layout pin the
+        # dialog to its size hint - that is also what drops the resize grip.
+        # Done via the layout rather than setFixedSize() because the height
+        # depends on how many rows _library_versions() produced.
+        layout.setSizeConstraint(QLayout.SetFixedSize)
 
     def _open_log(self, url: str) -> None:
         from PySide6.QtCore import QUrl

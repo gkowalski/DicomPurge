@@ -1,4 +1,4 @@
-"""Offscreen check: the XNAT Login button needs BOTH settings and loaded images.
+"""Offscreen check: the XNAT Login button tracks the credentials only.
 
 Nothing here talks to a server - the worker is never started. The point is the
 gating and the labelling, which is what the user actually sees.
@@ -54,20 +54,26 @@ def main():
         "the tooltip points at the menu when unconfigured",
     )
 
-    # 2. Settings only - still greyed. The two preconditions are independent,
-    #    so each has to be checked on its own.
+    # 2. Settings alone are enough. This is the reported bug: a relaunch with
+    #    saved credentials starts here, with nothing scanned yet, and used to
+    #    show a dead button.
     win.xnat_settings = complete
     win._update_xnat_button()
     check(
-        not win.xnat_login_button.isEnabled(),
-        "still greyed with settings but no images",
+        win.xnat_login_button.isEnabled(),
+        "enabled by settings alone, with no directory loaded",
     )
     check(
-        "input directory" in win.xnat_login_button.toolTip(),
-        "the tooltip asks for a directory once configured",
+        win.xnat_login_button.text() == "XNAT Login",
+        f"and reads 'XNAT Login' (got {win.xnat_login_button.text()!r})",
+    )
+    check(
+        win.xnat_settings.server in win.xnat_login_button.toolTip(),
+        "the tooltip names the server it will connect to",
     )
 
-    # 3. Images only - still greyed.
+    # 3. Images without settings stay greyed - credentials are the only
+    #    precondition left, so this is the one that still has to hold.
     win.xnat_settings = XnatSettings()
     win._start_scan(IN)
     for _ in range(40):
@@ -78,13 +84,13 @@ def main():
     win._update_xnat_button()
     check(
         not win.xnat_login_button.isEnabled(),
-        "still greyed with images but no settings",
+        "greyed with images but no settings",
     )
 
-    # 4. Both -> enabled.
+    # 4. Settings plus images - the ordinary working state.
     win.xnat_settings = complete
     win._update_xnat_button()
-    check(win.xnat_login_button.isEnabled(), "enabled once both preconditions are met")
+    check(win.xnat_login_button.isEnabled(), "enabled with both settings and images")
     check(
         win.xnat_login_button.text() == "XNAT Login",
         f"reads 'XNAT Login' before logging in (got {win.xnat_login_button.text()!r})",
@@ -118,12 +124,13 @@ def main():
     check(win.xnat_login_button.isEnabled(), "and re-enables the button")
     check(not win.xnat_logout_action.isEnabled(), "and disables Log Out again")
 
-    # 8. A rescan must drop the button back to disabled.
+    # 8. Unloading the series must NOT disable login any more - that coupling
+    #    is exactly what made a fresh launch look broken.
     win.xnat_settings = complete
     win._clear_series()
     check(
-        not win.xnat_login_button.isEnabled(),
-        "clearing the loaded series greys it again",
+        win.xnat_login_button.isEnabled(),
+        "clearing the loaded series leaves login enabled",
     )
 
     win.close()

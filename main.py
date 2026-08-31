@@ -48,6 +48,10 @@ def main() -> int:
     _install_excepthook()
 
     window = MainWindow(bridge)
+    # closeEvent covers the window-close, Cmd+Q and quit() paths; aboutToQuit
+    # also covers QApplication.exit(), which never closes windows. The handler
+    # is idempotent, so both firing is harmless.
+    app.aboutToQuit.connect(window.shutdown_xnat)
     window.show()
     return app.exec()
 

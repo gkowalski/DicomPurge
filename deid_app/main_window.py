@@ -438,13 +438,15 @@ class MainWindow(QMainWindow):
         self._update_xnat_button()
 
     def _update_xnat_button(self) -> None:
-        """Login needs both a complete configuration and a loaded directory."""
-        have_images = bool(self.series_map)
+        """Login needs only a complete configuration."""
         configured = self.xnat_settings.is_complete
         logged_in = self._xnat_user is not None
 
+        # Deliberately independent of whether a directory is loaded: logging in
+        # uploads nothing, and requiring images meant a fresh launch with saved
+        # credentials showed a dead button until you scanned something.
         self.xnat_login_button.setEnabled(
-            configured and have_images and not logged_in and not self._xnat_busy
+            configured and not logged_in and not self._xnat_busy
         )
         self.xnat_logout_action.setEnabled(logged_in and not self._xnat_busy)
 
@@ -460,8 +462,6 @@ class MainWindow(QMainWindow):
         if not configured:
             tip = ("Set the XNAT server, user ID and password under the "
                    "XNAT Settings menu.")
-        elif not have_images:
-            tip = "Load an input directory first."
         elif self._xnat_busy:
             tip = "Connecting..."
         else:
@@ -1400,19 +1400,32 @@ class MainWindow(QMainWindow):
         if self._prefetch_thread.isRunning():
             self._prefetch_thread.quit()
             self._prefetch_thread.wait(3000)
-        if self._xnat_thread is not None and self._xnat_thread.isRunning():
-            # Blocking rather than a plain emit: a queued logout races quit()
-            # and loses, leaving DELETE /data/JSESSION unsent and the server
-            # session to expire on its own. This waits for disconnect() to
-            # finish on the worker thread, which is bounded by its own timeout.
-            if self._xnat_worker is not None and self._xnat_worker.connected:
-                QMetaObject.invokeMethod(
-                    self._xnat_worker, "logout", Qt.BlockingQueuedConnection
-                )
-            self._xnat_thread.quit()
-            self._xnat_thread.wait(3000)
+        self.shutdown_xnat()
         log.info("Application closing")
         super().closeEvent(event)
+
+    def shutdown_xnat(self) -> None:
+        """Close the XNAT session and stop its thread. Safe to call twice.
+
+        Reached from closeEvent and from QApplication.aboutToQuit, because no
+        single one of them covers every way the app can end: closeEvent misses
+        QApplication.exit(), and aboutToQuit cannot veto a quit. Whichever runs
+        first does the work; the second returns at the isRunning() guard.
+        """
+        if self._xnat_thread is None or not self._xnat_thread.isRunning():
+            return
+        # Blocking rather than a plain emit: a queued logout races quit() and
+        # loses, leaving DELETE /data/JSESSION unsent and the server session to
+        # expire on its own. This waits for disconnect() to finish on the worker
+        # thread, which is bounded by its own timeout. Safe from aboutToQuit
+        # too - blocking-queued delivery needs the *worker's* event loop, which
+        # is still running at that point.
+        if self._xnat_worker is not None and self._xnat_worker.connected:
+            QMetaObject.invokeMethod(
+                self._xnat_worker, "logout", Qt.BlockingQueuedConnection
+            )
+        self._xnat_thread.quit()
+        self._xnat_thread.wait(3000)
 
 
 def frame_count_safe(ds) -> int:

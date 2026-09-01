@@ -79,8 +79,17 @@ class Series:
     reviewed: bool = False
     committed: bool = False
     # Withheld from export by the current settings. Owned by MainWindow, which
-    # is the only place that knows what those settings are.
-    skipped: bool = False
+    # is the only place that knows what those settings are - it recomputes this
+    # wholesale on every scan and settings change.
+    auto_skipped: bool = False
+    # Withheld because the user said so, from the series context menu. Kept
+    # separate from auto_skipped precisely so that recompute cannot clobber it.
+    manually_skipped: bool = False
+
+    @property
+    def skipped(self) -> bool:
+        """Withheld from export, for either reason."""
+        return self.auto_skipped or self.manually_skipped
 
     @property
     def is_structured_report(self) -> bool:
@@ -146,6 +155,21 @@ class Series:
         self.boxes.clear()
         self.reviewed = False
         self.committed = False
+
+    def set_skipped(self) -> None:
+        """Mark skipped by hand, discarding any boxes placed on it.
+
+        set_clean() also clears reviewed/committed: leaving 'committed' set on a
+        series whose boxes have just been thrown away would be incoherent, and
+        it means un-skipping returns the series to 'clean' - honest, since the
+        boxes really are gone.
+        """
+        self.manually_skipped = True
+        self.set_clean()
+
+    def clear_manual_skip(self) -> None:
+        """Undo set_skipped(). A settings-driven skip is unaffected."""
+        self.manually_skipped = False
 
     def label(self) -> str:
         desc = self.series_description or "(no description)"

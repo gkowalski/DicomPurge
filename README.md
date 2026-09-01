@@ -87,9 +87,12 @@ uv venv --python 3.12 && uv sync
    have still seen the images. Adding a new box to a committed series re-opens it as
    pending.
 8. **Right-click a series** for a popup menu: *Set status to Clean* (clears reviewed and
-   committed, and discards any boxes after a confirmation), *Commit series*, *Reset boxes*.
-   Setting the currently displayed series to Clean also deselects it, so clicking it again
-   re-marks it reviewed.
+   committed, and discards any boxes after a confirmation), *Commit series*, *Reset boxes*,
+   *Set status to Skipped* and *Un-skip series*. Setting the currently displayed series to
+   Clean also deselects it, so clicking it again re-marks it reviewed. **Set status to
+   Skipped** withholds that one series from the export whatever it contains — useful for an
+   ordinary image series you simply do not want to send — and discards any boxes on it,
+   after a confirmation naming how many.
 9. **Export** requires every series to be **reviewed or committed**. A series carrying
    uncommitted boxes (*pending*) blocks the export until you commit it; a *clean* series
    blocks it until you look at it. A *skipped* (orange) series never blocks it — it is
@@ -209,13 +212,21 @@ level — set the Log tab's level filter to `DEBUG` to see where the time goes.
 | Blue | `reviewed` | you selected the series and saw the images | allowed |
 | Red | `pending` | boxes placed but not committed | blocked |
 | Green | `committed` | boxes locked in | allowed |
-| Orange | `skipped` | withheld from the export — boxes cannot de-identify it | withheld |
+| Orange | `skipped` | withheld from the export — automatically, or because you said so | withheld |
 
-`skipped` outranks every other status: once the settings withhold a series, its review
-state no longer matters, and it does **not** block the export the way an unreviewed image
-does. Its files are simply never written. The right-click review actions are disabled for
-a skipped series. See [Files boxes cannot de-identify](#files-boxes-cannot-de-identify)
-for what puts a series in that state.
+`skipped` outranks every other status: once a series is withheld, its review state no
+longer matters, and it does **not** block the export the way an unreviewed image does. Its
+files are simply never written, and the review actions are disabled for it.
+
+A series becomes skipped either **automatically** — by one of the three Export settings,
+see [Files boxes cannot de-identify](#files-boxes-cannot-de-identify) — or **by hand**,
+via *Set status to Skipped* in the right-click menu. The two are tracked separately, so
+changing an Export checkbox never overwrites a decision you made yourself. Only your own
+skips can be undone from the menu (*Un-skip series*); to un-skip an automatic one, change
+the setting that caused it — the menu entry is disabled there and says so.
+
+Manual skips are session state, like redaction boxes: rescanning or loading another
+directory discards them, and warns first.
 
 Everything — selections, commits, per-file results, and exceptions — is logged to the
 **Log** tab and to `~/dicompurge.log`.

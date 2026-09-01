@@ -609,12 +609,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid directory", f"{root} is not a directory.")
             return
 
-        if self.series_map and any(s.boxes for s in self.series_map.values()):
+        if self.series_map and any(
+            s.boxes or s.manually_skipped for s in self.series_map.values()
+        ):
             answer = QMessageBox.question(
                 self,
                 "Discard current work?",
-                "Loading a new directory discards the redaction boxes placed so far.\n"
-                "Continue?",
+                "Loading a new directory discards the redaction boxes and manual "
+                "skips placed so far.\nContinue?",
             )
             if answer != QMessageBox.Yes:
                 log.info("Directory change cancelled by user")
@@ -748,8 +750,10 @@ class MainWindow(QMainWindow):
                 or (strip_docs and series.has_document_only)
                 or (skip_no_image and series.has_no_image_data)
             )
-            if skipped != series.skipped:
-                series.skipped = skipped
+            # auto_skipped only: a manual skip lives in its own field so this
+            # wholesale recompute cannot clobber the user's decision.
+            if skipped != series.auto_skipped:
+                series.auto_skipped = skipped
                 changed += 1
             self._refresh_item(series)
         total = sum(1 for s in self.series_map.values() if s.skipped)
@@ -807,6 +811,23 @@ class MainWindow(QMainWindow):
         reset_action = menu.addAction("Reset boxes")
         reset_action.setEnabled(not series.skipped and bool(series.boxes))
 
+        menu.addSeparator()
+
+        skip_action = menu.addAction("Set status to Skipped")
+        skip_action.setToolTip(
+            "Withhold this series from the export, discarding any boxes on it"
+        )
+        skip_action.setEnabled(not series.skipped)
+
+        unskip_action = menu.addAction("Un-skip series")
+        unskip_action.setEnabled(series.manually_skipped and not series.auto_skipped)
+        if series.auto_skipped:
+            unskip_action.setToolTip(
+                "Skipped by an Export setting - change it under Settings > Export"
+            )
+        else:
+            unskip_action.setToolTip("Include this series in the export again")
+
         chosen = menu.exec(self.tree.viewport().mapToGlobal(position))
         if chosen is None:
             return
@@ -816,6 +837,44 @@ class MainWindow(QMainWindow):
             self._commit(series)
         elif chosen is reset_action:
             self._reset_boxes(series)
+        elif chosen is skip_action:
+            self._set_series_skipped(series)
+        elif chosen is unskip_action:
+            self._clear_series_skip(series)
+
+    def _set_series_skipped(self, series: Series) -> None:
+        """Withhold a series from the export, discarding any boxes on it."""
+        name = series.series_description or series.series_uid
+        if series.boxes:
+            answer = QMessageBox.question(
+                self,
+                "Discard redaction boxes?",
+                f"Marking this series Skipped also discards "
+                f"{len(series.boxes)} redaction box(es), and it will not be "
+                f"exported.\n\nContinue?",
+            )
+            if answer != QMessageBox.Yes:
+                log.info("Skip cancelled for series %s", name)
+                return
+        previous = series.status
+        series.set_skipped()
+        log.info("Series %s marked skipped by hand (was %s)", name, previous)
+        self._refresh_item(series)
+        if series is self.current_series:
+            self._update_boxes_label()
+            self.canvas.set_boxes([])
+        self._update_export_button()
+
+    def _clear_series_skip(self, series: Series) -> None:
+        """Undo a manual skip. A settings-driven skip is unaffected."""
+        series.clear_manual_skip()
+        log.info(
+            "Series %s un-skipped (now %s)",
+            series.series_description or series.series_uid,
+            series.status,
+        )
+        self._refresh_item(series)
+        self._update_export_button()
 
     def _set_series_clean(self, series: Series) -> None:
         if series.boxes:

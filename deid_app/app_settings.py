@@ -31,6 +31,13 @@ class AppSettings:
     dataset_cache_entries: int = 12
     # Matches LogPane's own starting level, so the default is a no-op.
     gui_log_level: int = logging.INFO
+    # Some report objects carry a PDF copy of the report alongside the image.
+    # Redaction boxes never touch it, so by default it is removed on export.
+    strip_embedded_documents: bool = True
+    # Structured Reports hold text rather than pixels, so boxes cannot alter
+    # them either. Off by default: unlike an embedded PDF, which duplicates the
+    # image beside it, an SR is often the only copy of the report.
+    skip_structured_reports: bool = False
 
     @classmethod
     def load(cls, settings: QSettings) -> "AppSettings":
@@ -44,6 +51,13 @@ class AppSettings:
                 return fallback
             return max(low, min(high, value))
 
+        def as_bool(key: str, fallback: bool) -> bool:
+            value = settings.value(key, fallback)
+            if isinstance(value, bool):
+                return value
+            # QSettings hands back "true"/"false" strings on some platforms.
+            return str(value).strip().lower() not in ("false", "0", "")
+
         return cls(
             prefetch_ahead=as_int("prefetch/ahead", defaults.prefetch_ahead, 0, 32),
             prefetch_behind=as_int("prefetch/behind", defaults.prefetch_behind, 0, 32),
@@ -55,6 +69,12 @@ class AppSettings:
                 "cache/dataset_entries", defaults.dataset_cache_entries, 1, 256
             ),
             gui_log_level=as_int("log/gui_level", defaults.gui_log_level, 0, 50),
+            strip_embedded_documents=as_bool(
+                "export/strip_embedded_documents", defaults.strip_embedded_documents
+            ),
+            skip_structured_reports=as_bool(
+                "export/skip_structured_reports", defaults.skip_structured_reports
+            ),
         )
 
     def save(self, settings: QSettings) -> None:
@@ -64,3 +84,9 @@ class AppSettings:
         settings.setValue("cache/frame_mb", self.frame_cache_mb)
         settings.setValue("cache/dataset_entries", self.dataset_cache_entries)
         settings.setValue("log/gui_level", self.gui_log_level)
+        settings.setValue(
+            "export/strip_embedded_documents", self.strip_embedded_documents
+        )
+        settings.setValue(
+            "export/skip_structured_reports", self.skip_structured_reports
+        )

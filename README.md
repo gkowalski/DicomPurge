@@ -92,8 +92,12 @@ uv venv --python 3.12 && uv sync
    re-marks it reviewed.
 9. **Export** requires every series to be **reviewed or committed**. A series carrying
    uncommitted boxes (*pending*) blocks the export until you commit it; a *clean* series
-   blocks it until you look at it. Export then prompts for an output directory and writes
-   each file to the same relative path underneath it.
+   blocks it until you look at it. A *skipped* (orange) series never blocks it — it is
+   withheld deliberately, so there is nothing to review. Export then prompts for an output
+   directory and writes each file to the same relative path underneath it. The summary
+   reports how many files were written, redacted, had an embedded document removed, and
+   were skipped — naming the skipped ones, since the exported set is then smaller than the
+   input set.
 
 ### Non-pixel-data DICOM files
 
@@ -115,7 +119,47 @@ cases it might encounter instead of crashing:
 
 Series containing these instances still go through the normal review/commit workflow
 (status colors, export) even though there is nothing to redact on that particular
-instance.
+instance — unless the export settings withhold them, which is what the next section
+covers.
+
+### Files boxes cannot de-identify
+
+Some DICOM objects carry identifying content that a redaction box can never reach,
+because it is not in the pixels. Two **Export** settings (Settings → Export, `Ctrl+,` /
+`Cmd+,`) decide what happens to them.
+
+**Embedded documents — removed by default.** A report object can carry a PDF (or HTML)
+copy of the report in `(0042,0011)` *EncapsulatedDocument* **alongside** its image. The
+image is a rasterised picture of the page; the document is a second, independent copy of
+the same text. Redaction only rewrites pixels, so boxing out a name on screen leaves the
+document untouched — and nothing in the UI displays it, so there is no way to notice
+before the file leaves the machine.
+
+> ☑ **Remove embedded documents (PDFs) from exported files** — *default on*
+
+With this on, `(0042,0011)` and `(0042,0012)` *MIMETypeOfEncapsulatedDocument* are
+deleted on export and the redacted image is kept. Such a file is **rewritten even when it
+has no boxes**, because the byte-for-byte copy that ordinarily applies is exactly what
+would leak the document. Objects that are *only* a document (Encapsulated PDF/CDA/STL/…
+SOP Classes, no pixel data at all) cannot be de-identified in any way, so they are
+withheld from the export entirely and shown as `skipped`.
+
+**Structured Reports — kept by default.** An SR holds its content as text in a
+`ContentSequence`, not as pixels, so boxes cannot alter it either.
+
+> ☐ **Skip Structured Reports (they cannot be de-identified with boxes)** — *default off*
+
+This one defaults to **off** because, unlike an embedded PDF that duplicates the image
+beside it, an SR is often the only copy of the report — dropping it silently would lose
+data. Turn it on and every SR series is withheld and shown as `skipped`.
+
+Every strip and every skip is logged by filename, and the export summary reports the
+counts and names the skipped files. The exported set can be smaller than the input set,
+so this is stated rather than left to be discovered.
+
+**What this does not cover:** `(0042,0010)` *DocumentTitle* is not removed, and neither
+are DICOM header identifiers — see the scope note under
+[How the redaction works](#how-the-redaction-works).
 
 ### Scrolling performance
 
@@ -149,6 +193,13 @@ level — set the Log tab's level filter to `DEBUG` to see where the time goes.
 | Blue | `reviewed` | you selected the series and saw the images | allowed |
 | Red | `pending` | boxes placed but not committed | blocked |
 | Green | `committed` | boxes locked in | allowed |
+| Orange | `skipped` | withheld from the export — boxes cannot de-identify it | withheld |
+
+`skipped` outranks every other status: once the settings withhold a series, its review
+state no longer matters, and it does **not** block the export the way an unreviewed image
+does. Its files are simply never written. The right-click review actions are disabled for
+a skipped series. See [Files boxes cannot de-identify](#files-boxes-cannot-de-identify)
+for what puts a series in that state.
 
 Everything — selections, commits, per-file results, and exceptions — is logged to the
 **Log** tab and to `~/dicompurge.log`.
@@ -172,14 +223,17 @@ For every file in a series with boxes:
   are updated to match. This is logged per file.
 - `(0028,0301) BurnedInAnnotation` is set to `NO` on redacted files.
 
-Series with no boxes are copied through byte-for-byte.
+Series with no boxes are copied through byte-for-byte — except files carrying an
+embedded document, which are rewritten so the document can be removed (see
+[Files boxes cannot de-identify](#files-boxes-cannot-de-identify)).
 
 Boxes are stored as fractions of the image (0–1), not screen pixels, so they are immune
 to window resizing and to instances within a series having different dimensions.
 
-**Scope note:** this tool redacts *pixels and overlays*. It does not scrub identifying
-DICOM metadata (patient name, IDs, dates, UIDs, private tags) — pair it with a tag-level
-de-identification step if you need PS3.15 Annex E conformance.
+**Scope note:** this tool redacts *pixels and overlays*, and removes embedded documents
+that pixels cannot cover. It does **not** scrub identifying DICOM metadata (patient name,
+IDs, dates, UIDs, private tags), which remains present in every exported file — pair it
+with a tag-level de-identification step if you need PS3.15 Annex E conformance.
 
 ## Tests
 
@@ -191,7 +245,13 @@ QT_QPA_PLATFORM=offscreen uv run python tests/test_metadata_pane.py
 QT_QPA_PLATFORM=offscreen uv run python tests/test_commit_shortcut.py
 QT_QPA_PLATFORM=offscreen uv run python tests/test_load_dialog.py   # popup never outlives a load
 uv run python tests/test_overlay_display.py
+uv run python tests/test_embedded_document.py       # embedded PDFs never survive an export
+uv run python tests/test_skipped_series.py          # SR/document series are withheld and shown
 ```
+
+The last two build their own fixtures (`build_documents()` in `tests/make_fixtures.py`)
+in a separate root, deliberately: the shared `/tmp/fixtures` set is treated by the other
+tests as all-images, and a report object is neither an image nor redactable.
 
 Each of those is a standalone script that prints `PASS`/`FAIL` per check and exits
 non-zero on failure. `tests/test_render.py` and `tests/test_sr_render.py` are plain

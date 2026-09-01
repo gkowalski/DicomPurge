@@ -9,11 +9,27 @@ from pathlib import Path
 import pydicom
 from PySide6.QtCore import QObject, QThread, Signal
 
+from .sr_render import SR_SOP_CLASS_UIDS
+
 log = logging.getLogger(__name__)
 
 # A redaction box, stored as fractions (0..1) of the series' reference image so
 # that it survives differing instance sizes and any display scaling.
 Box = tuple[float, float, float, float]  # x, y, w, h
+
+# Tag (0042,0011) EncapsulatedDocument - a whole document (usually a PDF)
+# carried inside the instance, which redaction boxes never touch.
+ENCAPSULATED_DOCUMENT_TAG = 0x00420011
+
+# SOP Classes whose ENTIRE payload is that document: no pixel data exists, so
+# there is nothing for the box editor to redact (PS3.6 Annex A).
+ENCAPSULATED_DOCUMENT_SOP_CLASS_UIDS = {
+    "1.2.840.10008.5.1.4.1.1.104.1",  # Encapsulated PDF Storage
+    "1.2.840.10008.5.1.4.1.1.104.2",  # Encapsulated CDA Storage
+    "1.2.840.10008.5.1.4.1.1.104.3",  # Encapsulated STL Storage
+    "1.2.840.10008.5.1.4.1.1.104.4",  # Encapsulated OBJ Storage
+    "1.2.840.10008.5.1.4.1.1.104.5",  # Encapsulated MTL Storage
+}
 
 
 @dataclass
@@ -23,6 +39,12 @@ class Instance:
     sop_uid: str
     rows: int
     columns: int
+    # Carries (0042,0011): an embedded document that redaction cannot reach.
+    has_embedded_document: bool = False
+    # ...and that document is the whole payload, so there are no pixels at all.
+    is_document_only: bool = False
+    # A Structured Report: text in a ContentSequence, no pixels for boxes to hit.
+    is_structured_report: bool = False
 
     def sort_key(self) -> tuple:
         return (self.instance_number, self.path.name)
@@ -42,6 +64,17 @@ class Series:
     boxes: list[Box] = field(default_factory=list)
     reviewed: bool = False
     committed: bool = False
+    # Withheld from export by the current settings. Owned by MainWindow, which
+    # is the only place that knows what those settings are.
+    skipped: bool = False
+
+    @property
+    def is_structured_report(self) -> bool:
+        return any(i.is_structured_report for i in self.instances)
+
+    @property
+    def has_document_only(self) -> bool:
+        return any(i.is_document_only for i in self.instances)
 
     @property
     def rows(self) -> int:
@@ -53,12 +86,18 @@ class Series:
 
     @property
     def status(self) -> str:
-        """One of 'clean', 'reviewed', 'pending' or 'committed'.
+        """One of 'skipped', 'clean', 'reviewed', 'pending' or 'committed'.
 
         'reviewed' is set automatically the first time the user selects the
         series (they have looked at the images). 'pending' means boxes have been
         placed but not committed, and always outranks 'reviewed'.
+
+        'skipped' outranks everything: once a series is withheld from the export
+        its review state is irrelevant, and showing 'committed' on a file that
+        will never be written would be actively misleading.
         """
+        if self.skipped:
+            return "skipped"
         if self.committed:
             return "committed"
         if self.boxes:
@@ -69,8 +108,12 @@ class Series:
 
     @property
     def export_ready(self) -> bool:
-        """A series may be exported once it is reviewed or committed."""
-        return self.status in ("reviewed", "committed")
+        """Whether this series can stop blocking the export.
+
+        A skipped series counts as ready: it is deliberately withheld, so it
+        must not trip the not-ready gate the way an unreviewed image would.
+        """
+        return self.status in ("reviewed", "committed", "skipped")
 
     def set_clean(self) -> None:
         """Drop every box and both status flags."""
@@ -155,6 +198,33 @@ class ScanWorker(QObject):
                         series_map[uid] = series
                         log.debug("New series %s (%s)", uid, series.series_description)
 
+                    # Classified from the header alone. Note that
+                    # stop_before_pixels drops PixelData whether or not the file
+                    # has any, so "document only" must come from the SOP Class,
+                    # never from a has_pixel_data() check here.
+                    has_doc = ENCAPSULATED_DOCUMENT_TAG in ds
+                    sop_uid = str(_get(ds, "SOPClassUID", ""))
+                    doc_only = sop_uid in ENCAPSULATED_DOCUMENT_SOP_CLASS_UIDS
+                    # sr_render.is_structured_report() cannot be used here: its
+                    # fallback calls has_pixel_data(), which is meaningless on a
+                    # stop_before_pixels read. Absence of Rows stands in for it.
+                    is_sr = sop_uid in SR_SOP_CLASS_UIDS or (
+                        "ContentSequence" in ds and "Rows" not in ds
+                    )
+                    if is_sr:
+                        log.info(
+                            "%s is a Structured Report; redaction boxes cannot "
+                            "de-identify it",
+                            path.name,
+                        )
+                    if has_doc or doc_only:
+                        log.info(
+                            "%s carries an embedded document (%s)%s",
+                            path.name,
+                            _get(ds, "MIMETypeOfEncapsulatedDocument", "unknown type"),
+                            " and has no pixel data" if doc_only else "",
+                        )
+
                     series.instances.append(
                         Instance(
                             path=path,
@@ -162,6 +232,9 @@ class ScanWorker(QObject):
                             sop_uid=str(_get(ds, "SOPInstanceUID", path.name)),
                             rows=int(_get(ds, "Rows", 0) or 0),
                             columns=int(_get(ds, "Columns", 0) or 0),
+                            has_embedded_document=bool(has_doc or doc_only),
+                            is_document_only=bool(doc_only),
+                            is_structured_report=bool(is_sr),
                         )
                     )
                 except Exception as exc:  # noqa: BLE001

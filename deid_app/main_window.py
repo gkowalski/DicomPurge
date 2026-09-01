@@ -75,12 +75,15 @@ STATUS_COLORS = {
     "reviewed": QColor("#1e7fd4"),
     "pending": QColor("#e53935"),
     "committed": QColor("#2e9e4f"),
+    # Orange: withheld from the export, whatever the reason.
+    "skipped": QColor("#f57c00"),
 }
 STATUS_TEXT = {
     "clean": "not reviewed",
     "reviewed": "reviewed",
     "pending": "boxes placed - NOT committed",
     "committed": "committed",
+    "skipped": "skipped",
 }
 MAX_RECENT_DIRS = 10
 
@@ -354,6 +357,10 @@ class MainWindow(QMainWindow):
             values.frame_cache_entries, values.frame_cache_mb * 1024 * 1024
         )
         self.log_pane.set_min_level(values.gui_log_level)
+        # Either export checkbox can change which series are withheld, so the
+        # tree has to be re-marked without waiting for a rescan.
+        self._update_skipped_series()
+        self._update_export_button()
         log.info(
             "Settings applied: prefetch %d ahead / %d behind, frame cache %d frames "
             "or %d MB, dataset cache %d files",
@@ -640,6 +647,7 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         self.browse_button.setEnabled(True)
         self._populate_tree()
+        self._update_skipped_series()
         count = len(series_map)
         files = sum(len(s.instances) for s in series_map.values())
         self.statusBar().showMessage(f"{count} series / {files} image(s) loaded")
@@ -722,6 +730,31 @@ class MainWindow(QMainWindow):
         self.tree.expandAll()
         log.info("Tree populated with %d series", len(self.series_items))
 
+    def _update_skipped_series(self) -> None:
+        """Mark the series the current settings will withhold from export.
+
+        Lives here rather than on Series because only MainWindow knows what the
+        settings say. Covers both reasons a series can be withheld so the tree
+        tells one consistent story: orange and "skipped" means "will not be
+        exported", regardless of why.
+        """
+        skip_sr = self.app_settings.skip_structured_reports
+        strip_docs = self.app_settings.strip_embedded_documents
+        changed = 0
+        for series in self.series_map.values():
+            skipped = (skip_sr and series.is_structured_report) or (
+                strip_docs and series.has_document_only
+            )
+            if skipped != series.skipped:
+                series.skipped = skipped
+                changed += 1
+            self._refresh_item(series)
+        total = sum(1 for s in self.series_map.values() if s.skipped)
+        if changed:
+            log.info(
+                "%d series will be withheld from export (%d changed)", total, changed
+            )
+
     def _refresh_item(self, series: Series) -> None:
         item = self.series_items.get(series.series_uid)
         if item is None:
@@ -763,13 +796,13 @@ class MainWindow(QMainWindow):
 
         clean_action = menu.addAction("Set status to Clean")
         clean_action.setToolTip("Clear reviewed/committed and discard any redaction boxes")
-        clean_action.setEnabled(series.status != "clean")
+        clean_action.setEnabled(not series.skipped and series.status != "clean")
 
         commit_action = menu.addAction("Commit series")
-        commit_action.setEnabled(not series.committed)
+        commit_action.setEnabled(not series.skipped and not series.committed)
 
         reset_action = menu.addAction("Reset boxes")
-        reset_action.setEnabled(bool(series.boxes))
+        reset_action.setEnabled(not series.skipped and bool(series.boxes))
 
         chosen = menu.exec(self.tree.viewport().mapToGlobal(position))
         if chosen is None:
@@ -1345,6 +1378,8 @@ class MainWindow(QMainWindow):
             self._on_export_progress,
             self._on_export_finished,
             self._on_export_failed,
+            strip_documents=self.app_settings.strip_embedded_documents,
+            skip_structured_reports=self.app_settings.skip_structured_reports,
         )
         self._export_thread.start()
 
@@ -1354,13 +1389,43 @@ class MainWindow(QMainWindow):
         self.progress.setValue(done)
         self.statusBar().showMessage(f"Exporting {done}/{total}: {name}")
 
-    @Slot(int, int, int)
-    def _on_export_finished(self, written: int, redacted: int, errors: int) -> None:
+    @Slot(int, int, int, int, object)
+    def _on_export_finished(
+        self,
+        written: int,
+        redacted: int,
+        errors: int,
+        stripped: int = 0,
+        skipped=None,
+    ) -> None:
+        skipped = list(skipped or [])
         self.progress.setVisible(False)
         self.export_button.setEnabled(True)
         self.statusBar().showMessage(
-            f"Export complete: {written} written, {redacted} redacted, {errors} error(s)"
+            f"Export complete: {written} written, {redacted} redacted, "
+            f"{stripped} document(s) removed, {len(skipped)} skipped, "
+            f"{errors} error(s)"
         )
+
+        detail = f"{written} file(s) written ({redacted} redacted)."
+        if stripped:
+            detail += (
+                f"\n\n{stripped} embedded document(s) were removed. Redaction "
+                "boxes never reach an embedded PDF, so it is stripped rather "
+                "than exported un-redacted."
+            )
+        if skipped:
+            # Naming them matters: the exported set is smaller than the input
+            # set, and silently dropping files would be its own kind of bug.
+            names = "\n".join(f"  - {n}" for n in skipped[:15])
+            if len(skipped) > 15:
+                names += "\n  ..."
+            detail += (
+                f"\n\n{len(skipped)} file(s) were skipped - they contain only "
+                f"an embedded document and cannot be de-identified by this "
+                f"tool:\n{names}"
+            )
+
         if errors:
             QMessageBox.warning(
                 self,
@@ -1368,12 +1433,10 @@ class MainWindow(QMainWindow):
                 f"{written} file(s) written, {redacted} redacted, {errors} failed.\n"
                 "See the Log tab for details.",
             )
+        elif skipped:
+            QMessageBox.warning(self, "Export complete - some files skipped", detail)
         else:
-            QMessageBox.information(
-                self,
-                "Export complete",
-                f"{written} file(s) written ({redacted} redacted).",
-            )
+            QMessageBox.information(self, "Export complete", detail)
 
     @Slot(str)
     def _on_export_failed(self, message: str) -> None:

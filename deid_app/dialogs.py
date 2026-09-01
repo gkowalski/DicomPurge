@@ -154,6 +154,34 @@ class SettingsDialog(QDialog):
         log_form.addRow("Log tab default level:", self.level_combo)
         layout.addWidget(logging_box)
 
+        # Export -----------------------------------------------------------
+        export_box = QGroupBox("Export")
+        export_form = QVBoxLayout(export_box)
+        self.strip_docs_check = QCheckBox(
+            "Remove embedded documents (PDFs) from exported files"
+        )
+        self.strip_docs_check.setChecked(current.strip_embedded_documents)
+        self.strip_docs_check.setToolTip(
+            "Some report objects carry a PDF copy of the report alongside the "
+            "image. Redaction boxes do not apply to that copy, so it is removed "
+            "from the exported file.\n\nFiles that contain only a PDF and no "
+            "image cannot be de-identified at all and are skipped; the export "
+            "summary lists them."
+        )
+        export_form.addWidget(self.strip_docs_check)
+
+        self.skip_sr_check = QCheckBox(
+            "Skip Structured Reports (they cannot be de-identified with boxes)"
+        )
+        self.skip_sr_check.setChecked(current.skip_structured_reports)
+        self.skip_sr_check.setToolTip(
+            "A Structured Report holds text rather than pixels, so redaction "
+            "boxes cannot alter it.\n\nWith this on, such series are withheld "
+            "from the export and shown as skipped in the series tree."
+        )
+        export_form.addWidget(self.skip_sr_check)
+        layout.addWidget(export_box)
+
         # Recent directories ------------------------------------------------
         self.clear_recent_check = QCheckBox("Clear the list of recent input directories")
         self.clear_recent_check.setToolTip(
@@ -187,6 +215,8 @@ class SettingsDialog(QDialog):
         self.dataset_spin.setValue(defaults.dataset_cache_entries)
         index = self.level_combo.findData(defaults.gui_log_level)
         self.level_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.strip_docs_check.setChecked(defaults.strip_embedded_documents)
+        self.skip_sr_check.setChecked(defaults.skip_structured_reports)
 
     @property
     def values(self) -> AppSettings:
@@ -197,6 +227,8 @@ class SettingsDialog(QDialog):
             frame_cache_mb=self.frame_mb_spin.value(),
             dataset_cache_entries=self.dataset_spin.value(),
             gui_log_level=self.level_combo.currentData(),
+            strip_embedded_documents=self.strip_docs_check.isChecked(),
+            skip_structured_reports=self.skip_sr_check.isChecked(),
         )
 
     @property

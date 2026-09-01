@@ -176,6 +176,28 @@ def redact_dataset(ds: Dataset, boxes) -> dict:
     return summary
 
 
+# (0042,0011) EncapsulatedDocument and (0042,0012) its MIME type. An embedded
+# document is a second, independent copy of the report that redaction boxes
+# never reach and that no part of this app displays - so a reviewer has no way
+# to notice it before the file leaves the machine.
+ENCAPSULATED_DOC_TAGS = (0x00420011, 0x00420012)
+
+
+def strip_embedded_document(ds: Dataset) -> bool:
+    """Delete the encapsulated document. True if anything was removed.
+
+    Leaves a conformant object: these tags are a vendor addition to the
+    Secondary Capture IOD rather than a required part of it, and pixel data is
+    untouched, so the redacted image survives intact.
+    """
+    removed = False
+    for tag in ENCAPSULATED_DOC_TAGS:
+        if tag in ds:
+            del ds[tag]
+            removed = True
+    return removed
+
+
 def _save(ds: Dataset, dst) -> None:
     """save_as() across pydicom 2.x / 3.x keyword differences."""
     import inspect
@@ -187,9 +209,15 @@ def _save(ds: Dataset, dst) -> None:
         ds.save_as(str(dst), write_like_original=False)
 
 
-def redact_file(src, dst, boxes) -> dict:
-    """Read `src`, apply `boxes`, write the result to `dst`."""
+def redact_file(src, dst, boxes, strip_documents: bool = False) -> dict:
+    """Read `src`, apply `boxes`, write the result to `dst`.
+
+    With `strip_documents` the embedded document is removed as well, which is
+    why this is called even for files with no boxes at all - copying such a file
+    byte-for-byte is exactly what would leak the document.
+    """
     ds = pydicom.dcmread(str(src))
     summary = redact_dataset(ds, boxes)
+    summary["stripped"] = bool(strip_documents and strip_embedded_document(ds))
     _save(ds, dst)
     return summary

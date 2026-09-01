@@ -13,15 +13,25 @@ log = logging.getLogger(__name__)
 
 
 class ExportWorker(QObject):
-    progress = Signal(int, int, str)   # done, total, current file
-    finished = Signal(int, int, int)   # written, redacted, errors
+    progress = Signal(int, int, str)        # done, total, current file
+    # written, redacted, errors, stripped, skipped
+    finished = Signal(int, int, int, int, object)
     failed = Signal(str)
 
-    def __init__(self, series_list, input_root: Path, output_root: Path) -> None:
+    def __init__(
+        self,
+        series_list,
+        input_root: Path,
+        output_root: Path,
+        strip_documents: bool = True,
+        skip_structured_reports: bool = False,
+    ) -> None:
         super().__init__()
         self.series_list = list(series_list)
         self.input_root = Path(input_root)
         self.output_root = Path(output_root)
+        self.strip_documents = bool(strip_documents)
+        self.skip_structured_reports = bool(skip_structured_reports)
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -29,7 +39,8 @@ class ExportWorker(QObject):
         log.warning("Export cancellation requested")
 
     def run(self) -> None:
-        written = redacted = errors = 0
+        written = redacted = errors = stripped = 0
+        skipped: list[str] = []
         try:
             total = sum(len(s.instances) for s in self.series_list)
             log.info(
@@ -50,7 +61,9 @@ class ExportWorker(QObject):
                 for instance in series.instances:
                     if self._cancelled:
                         log.warning("Export cancelled after %d file(s)", done)
-                        self.finished.emit(written, redacted, errors)
+                        self.finished.emit(
+                            written, redacted, errors, stripped, skipped
+                        )
                         return
                     done += 1
                     src = instance.path
@@ -65,18 +78,50 @@ class ExportWorker(QObject):
                     dst = self.output_root / relative
                     self.progress.emit(done, total, str(relative))
                     try:
-                        dst.parent.mkdir(parents=True, exist_ok=True)
-                        if boxes:
-                            summary = redact_file(src, dst, boxes)
-                            redacted += 1
-                            log.info(
-                                "Redacted %s (%d frame(s)%s)",
+                        # A document-only object is entirely a PDF (or CDA, ...)
+                        # with no pixel data, so there is nothing the box editor
+                        # could ever redact. Exporting it would ship the report
+                        # verbatim, so it is left behind and reported instead.
+                        if self.strip_documents and instance.is_document_only:
+                            skipped.append(str(relative))
+                            log.warning(
+                                "Skipped %s: contains only an embedded document "
+                                "and cannot be de-identified",
                                 relative,
-                                summary.get("frames", 0),
-                                ", overlays " + ",".join(summary["overlays"])
-                                if summary.get("overlays")
-                                else "",
                             )
+                            continue
+
+                        # A Structured Report is text in a ContentSequence, so
+                        # there are no pixels for a redaction box to act on.
+                        if self.skip_structured_reports and instance.is_structured_report:
+                            skipped.append(str(relative))
+                            log.warning(
+                                "Skipped %s: contains only a Structured Report "
+                                "and cannot be de-identified",
+                                relative,
+                            )
+                            continue
+
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        # The embedded document survives a byte-for-byte copy,
+                        # so a file carrying one must be rewritten even when it
+                        # has no boxes - that copy is the leak.
+                        strip = self.strip_documents and instance.has_embedded_document
+                        if boxes or strip:
+                            summary = redact_file(src, dst, boxes, strip_documents=strip)
+                            if boxes:
+                                redacted += 1
+                                log.info(
+                                    "Redacted %s (%d frame(s)%s)",
+                                    relative,
+                                    summary.get("frames", 0),
+                                    ", overlays " + ",".join(summary["overlays"])
+                                    if summary.get("overlays")
+                                    else "",
+                                )
+                            if summary.get("stripped"):
+                                stripped += 1
+                                log.info("Removed the embedded document from %s", relative)
                         else:
                             shutil.copy2(src, dst)
                             log.debug("Copied unmodified %s", relative)
@@ -86,20 +131,27 @@ class ExportWorker(QObject):
                         log.exception("Failed to export %s: %s", src, exc)
 
             log.info(
-                "Export finished: %d written, %d redacted, %d error(s)",
+                "Export finished: %d written, %d redacted, %d embedded document(s) "
+                "removed, %d skipped, %d error(s)",
                 written,
                 redacted,
+                stripped,
+                len(skipped),
                 errors,
             )
-            self.finished.emit(written, redacted, errors)
+            self.finished.emit(written, redacted, errors, stripped, skipped)
         except Exception as exc:  # noqa: BLE001
             log.exception("Export failed: %s", exc)
             self.failed.emit(str(exc))
 
 
-def start_export(series_list, input_root, output_root, on_progress, on_finished, on_failed):
+def start_export(series_list, input_root, output_root, on_progress, on_finished,
+                 on_failed, strip_documents: bool = True,
+                 skip_structured_reports: bool = False):
     thread = QThread()
-    worker = ExportWorker(series_list, input_root, output_root)
+    worker = ExportWorker(
+        series_list, input_root, output_root, strip_documents, skip_structured_reports
+    )
     worker.moveToThread(thread)
     thread.started.connect(worker.run)
     worker.progress.connect(on_progress)

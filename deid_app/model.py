@@ -45,6 +45,20 @@ class Instance:
     is_document_only: bool = False
     # A Structured Report: text in a ContentSequence, no pixels for boxes to hit.
     is_structured_report: bool = False
+    # Whether the instance has an image at all. Inferred from Rows/Columns
+    # because the scan reads headers only - see the note in ScanWorker.run.
+    has_image_data: bool = True
+
+    @property
+    def is_uneditable_non_image(self) -> bool:
+        """No pixels, and not a Structured Report either.
+
+        This is exactly the branch in frame_worker that renders the
+        "Uneditable File" placeholder: an SR has no pixels either, but it is
+        shown as an HTML report and has its own export setting, so it must not
+        be swept up by the no-image-data option.
+        """
+        return not self.has_image_data and not self.is_structured_report
 
     def sort_key(self) -> tuple:
         return (self.instance_number, self.path.name)
@@ -75,6 +89,18 @@ class Series:
     @property
     def has_document_only(self) -> bool:
         return any(i.is_document_only for i in self.instances)
+
+    @property
+    def has_no_image_data(self) -> bool:
+        """True when every instance is an "Uneditable File" - no image, no SR.
+
+        Deliberately all() rather than any(): withholding a whole series because
+        one member happens to lack pixels would throw away the real images
+        beside it. Export still skips such an instance individually.
+        """
+        return bool(self.instances) and all(
+            i.is_uneditable_non_image for i in self.instances
+        )
 
     @property
     def rows(self) -> int:
@@ -208,8 +234,13 @@ class ScanWorker(QObject):
                     # sr_render.is_structured_report() cannot be used here: its
                     # fallback calls has_pixel_data(), which is meaningless on a
                     # stop_before_pixels read. Absence of Rows stands in for it.
+                    # Rows is absent exactly when the file has no pixel data:
+                    # verified against 6,390 real instances. has_pixel_data()
+                    # cannot be used here - stop_before_pixels drops PixelData
+                    # whether or not the file has any.
+                    has_image = "Rows" in ds and "Columns" in ds
                     is_sr = sop_uid in SR_SOP_CLASS_UIDS or (
-                        "ContentSequence" in ds and "Rows" not in ds
+                        "ContentSequence" in ds and not has_image
                     )
                     if is_sr:
                         log.info(
@@ -235,6 +266,7 @@ class ScanWorker(QObject):
                             has_embedded_document=bool(has_doc or doc_only),
                             is_document_only=bool(doc_only),
                             is_structured_report=bool(is_sr),
+                            has_image_data=bool(has_image),
                         )
                     )
                 except Exception as exc:  # noqa: BLE001

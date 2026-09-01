@@ -16,6 +16,7 @@ from pydicom.uid import (
 
 ENCAPSULATED_PDF_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.104.1"
 BASIC_TEXT_SR_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.88.11"
+GSPS_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.11.1"  # Grayscale Softcopy Presentation State
 
 # A minimal but genuine PDF, so tests can assert on the %PDF magic exactly as
 # they would against a real report. Even-length: DICOM OB values must be padded.
@@ -223,6 +224,19 @@ def build_documents(root: Path):
     item.TextValue = "Patient TEST^PATIENT: unremarkable study."
     ds.ContentSequence = [item]
     save(ds, root / "patientB" / "structured_report.dcm")
+
+    # A Grayscale Softcopy Presentation State: no pixel data, and no
+    # ContentSequence either, so it is neither an image nor a Structured
+    # Report. This is what the image pane shows as "Uneditable File".
+    uid_ps = generate_uid()
+    ds = _base(rows, cols, uid_ps, 5, "Visage Presentation State", "PR")
+    ds.SOPClassUID = GSPS_SOP_CLASS
+    ds.file_meta.MediaStorageSOPClassUID = GSPS_SOP_CLASS
+    del ds.Rows
+    del ds.Columns
+    ds.InstanceNumber = 1
+    ds.ContentLabel = "PRESENTATION"
+    save(ds, root / "patientB" / "presentation_state.dcm")
 
     # A plain image alongside them, so tests can prove there are no false
     # positives on ordinary files.

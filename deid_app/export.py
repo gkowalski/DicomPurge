@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal
 
 from .redaction import redact_file
+from .render import has_pixel_data, read_dataset
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class ExportWorker(QObject):
         output_root: Path,
         strip_documents: bool = True,
         skip_structured_reports: bool = False,
+        skip_files_without_image_data: bool = False,
     ) -> None:
         super().__init__()
         self.series_list = list(series_list)
@@ -32,6 +34,7 @@ class ExportWorker(QObject):
         self.output_root = Path(output_root)
         self.strip_documents = bool(strip_documents)
         self.skip_structured_reports = bool(skip_structured_reports)
+        self.skip_files_without_image_data = bool(skip_files_without_image_data)
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -102,6 +105,23 @@ class ExportWorker(QObject):
                             )
                             continue
 
+                        # No pixel data at all - a presentation state, waveform,
+                        # RT object and the like, shown as "Uneditable File" in
+                        # the image pane. The scan infers this from Rows, so
+                        # confirm it against the real file before dropping
+                        # anything; these are rare, so the read costs little.
+                        if (
+                            self.skip_files_without_image_data
+                            and instance.is_uneditable_non_image
+                            and not has_pixel_data(read_dataset(instance.path))
+                        ):
+                            skipped.append(str(relative))
+                            log.warning(
+                                "Skipped %s: has no image data to redact",
+                                relative,
+                            )
+                            continue
+
                         dst.parent.mkdir(parents=True, exist_ok=True)
                         # The embedded document survives a byte-for-byte copy,
                         # so a file carrying one must be rewritten even when it
@@ -147,10 +167,12 @@ class ExportWorker(QObject):
 
 def start_export(series_list, input_root, output_root, on_progress, on_finished,
                  on_failed, strip_documents: bool = True,
-                 skip_structured_reports: bool = False):
+                 skip_structured_reports: bool = False,
+                 skip_files_without_image_data: bool = False):
     thread = QThread()
     worker = ExportWorker(
-        series_list, input_root, output_root, strip_documents, skip_structured_reports
+        series_list, input_root, output_root, strip_documents,
+        skip_structured_reports, skip_files_without_image_data,
     )
     worker.moveToThread(thread)
     thread.started.connect(worker.run)

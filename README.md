@@ -114,8 +114,9 @@ cases it might encounter instead of crashing:
 - **Any other pixel-data-free instance** — Encapsulated PDF/CDA/STL, Presentation States
   (GSPS/CSPS), Waveform Storage, RT Structure Set/Plan, Registration objects, Real World
   Value Mapping, etc. — shows a placeholder instead of the missing image:
-  `Uneditable Image : No Pixel Data for image {filename} of image type {SOP Class name}`.
-  This is expected and logged at info level, not treated as an error.
+  `Uneditable File : No Pixel Data for image {filename} of image type {SOP Class name}`.
+  This is expected and logged at info level, not treated as an error. These are the
+  instances the **Skip files with no image data** export setting covers.
 
 Series containing these instances still go through the normal review/commit workflow
 (status colors, export) even though there is nothing to redact on that particular
@@ -125,7 +126,7 @@ covers.
 ### Files boxes cannot de-identify
 
 Some DICOM objects carry identifying content that a redaction box can never reach,
-because it is not in the pixels. Two **Export** settings (Settings → Export, `Ctrl+,` /
+because it is not in the pixels. Three **Export** settings (Settings → Export, `Ctrl+,` /
 `Cmd+,`) decide what happens to them.
 
 **Embedded documents — removed by default.** A report object can carry a PDF (or HTML)
@@ -152,6 +153,21 @@ withheld from the export entirely and shown as `skipped`.
 This one defaults to **off** because, unlike an embedded PDF that duplicates the image
 beside it, an SR is often the only copy of the report — dropping it silently would lose
 data. Turn it on and every SR series is withheld and shown as `skipped`.
+
+**Everything else with no pixel data — kept by default.** Presentation states, waveforms,
+RT objects, registrations and the like carry no image at all; these are the instances the
+image pane shows as `Uneditable File : No Pixel Data …`.
+
+> ☐ **Skip files with no image data (shown as "Uneditable File")** — *default off*
+
+This covers exactly the placeholder case and **not** Structured Reports, which have no
+pixels either but render as an HTML report and have their own checkbox above — so the two
+options stay independent and neither silently overrides the other. A series is only
+withheld when *every* instance in it lacks an image, so a series that merely contains one
+such file does not lose its real images.
+
+The three options are independent and can be combined; a series withheld for any reason
+shows the same orange `skipped` status.
 
 Every strip and every skip is logged by filename, and the export summary reports the
 counts and names the skipped files. The exported set can be smaller than the input set,

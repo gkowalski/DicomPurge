@@ -38,6 +38,11 @@ class AppSettings:
     # them either. Off by default: unlike an embedded PDF, which duplicates the
     # image beside it, an SR is often the only copy of the report.
     skip_structured_reports: bool = False
+    # Instances with no pixel data at all - presentation states, waveforms, RT
+    # objects and the like, shown as "Uneditable File" in the image pane. Off by
+    # default: they hold no burned-in annotation to redact, but they may still
+    # be data the user wants carried through.
+    skip_files_without_image_data: bool = False
 
     @classmethod
     def load(cls, settings: QSettings) -> "AppSettings":
@@ -75,6 +80,10 @@ class AppSettings:
             skip_structured_reports=as_bool(
                 "export/skip_structured_reports", defaults.skip_structured_reports
             ),
+            skip_files_without_image_data=as_bool(
+                "export/skip_files_without_image_data",
+                defaults.skip_files_without_image_data,
+            ),
         )
 
     def save(self, settings: QSettings) -> None:
@@ -89,4 +98,8 @@ class AppSettings:
         )
         settings.setValue(
             "export/skip_structured_reports", self.skip_structured_reports
+        )
+        settings.setValue(
+            "export/skip_files_without_image_data",
+            self.skip_files_without_image_data,
         )

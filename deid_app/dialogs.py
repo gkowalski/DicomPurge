@@ -180,6 +180,18 @@ class SettingsDialog(QDialog):
             "from the export and shown as skipped in the series tree."
         )
         export_form.addWidget(self.skip_sr_check)
+
+        self.skip_no_image_check = QCheckBox(
+            "Skip files with no image data (shown as \"Uneditable File\")"
+        )
+        self.skip_no_image_check.setChecked(current.skip_files_without_image_data)
+        self.skip_no_image_check.setToolTip(
+            "Presentation states, waveforms, RT objects and similar instances "
+            "carry no pixel data, so there is no image to draw a box on.\n\n"
+            "With this on, series made up entirely of such files are withheld "
+            "from the export and shown as skipped."
+        )
+        export_form.addWidget(self.skip_no_image_check)
         layout.addWidget(export_box)
 
         # Recent directories ------------------------------------------------
@@ -217,6 +229,7 @@ class SettingsDialog(QDialog):
         self.level_combo.setCurrentIndex(index if index >= 0 else 0)
         self.strip_docs_check.setChecked(defaults.strip_embedded_documents)
         self.skip_sr_check.setChecked(defaults.skip_structured_reports)
+        self.skip_no_image_check.setChecked(defaults.skip_files_without_image_data)
 
     @property
     def values(self) -> AppSettings:
@@ -229,6 +242,7 @@ class SettingsDialog(QDialog):
             gui_log_level=self.level_combo.currentData(),
             strip_embedded_documents=self.strip_docs_check.isChecked(),
             skip_structured_reports=self.skip_sr_check.isChecked(),
+            skip_files_without_image_data=self.skip_no_image_check.isChecked(),
         )
 
     @property

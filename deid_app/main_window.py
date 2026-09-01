@@ -740,10 +740,13 @@ class MainWindow(QMainWindow):
         """
         skip_sr = self.app_settings.skip_structured_reports
         strip_docs = self.app_settings.strip_embedded_documents
+        skip_no_image = self.app_settings.skip_files_without_image_data
         changed = 0
         for series in self.series_map.values():
-            skipped = (skip_sr and series.is_structured_report) or (
-                strip_docs and series.has_document_only
+            skipped = (
+                (skip_sr and series.is_structured_report)
+                or (strip_docs and series.has_document_only)
+                or (skip_no_image and series.has_no_image_data)
             )
             if skipped != series.skipped:
                 series.skipped = skipped
@@ -1380,6 +1383,9 @@ class MainWindow(QMainWindow):
             self._on_export_failed,
             strip_documents=self.app_settings.strip_embedded_documents,
             skip_structured_reports=self.app_settings.skip_structured_reports,
+            skip_files_without_image_data=(
+                self.app_settings.skip_files_without_image_data
+            ),
         )
         self._export_thread.start()
 

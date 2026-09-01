@@ -81,6 +81,17 @@ class ExportWorker(QObject):
                     dst = self.output_root / relative
                     self.progress.emit(done, total, str(relative))
                     try:
+                        # Marked skipped by hand from the series context menu.
+                        # Checked before the settings-driven branches below, and
+                        # keyed on manually_skipped rather than skipped so the
+                        # two reasons cannot both count the same file.
+                        if series.manually_skipped:
+                            skipped.append(str(relative))
+                            log.warning(
+                                "Skipped %s: series marked skipped by hand", relative
+                            )
+                            continue
+
                         # A document-only object is entirely a PDF (or CDA, ...)
                         # with no pixel data, so there is nothing the box editor
                         # could ever redact. Exporting it would ship the report

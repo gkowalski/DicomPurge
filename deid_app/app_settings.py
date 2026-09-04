@@ -7,11 +7,18 @@ dialog is accepted.
 from __future__ import annotations
 
 import logging
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 from PySide6.QtCore import QSettings
 
 log = logging.getLogger(__name__)
+
+# Bounds for the concurrent-upload setting. Each running upload holds its own
+# XNAT session, so the ceiling is deliberately low.
+MIN_CONCURRENT_UPLOADS = 1
+MAX_CONCURRENT_UPLOADS = 8
 
 # Level names offered for the Log tab, coarsest last.
 LOG_LEVELS: list[tuple[str, int]] = [
@@ -43,6 +50,27 @@ class AppSettings:
     # default: they hold no burned-in annotation to redact, but they may still
     # be data the user wants carried through.
     skip_files_without_image_data: bool = False
+    # XNAT upload. Zip mode sends one DICOM-zip per study straight to the
+    # archive; individual mode posts each file (gradual-DICOM) to the
+    # prearchive. The temp directory holds the de-identified copies (and the
+    # zip) while a study uploads; empty means the system temp directory.
+    xnat_upload_zip: bool = True
+    xnat_upload_temp_dir: str = ""
+    xnat_upload_max_concurrent: int = 2
+
+    def export_options(self):
+        """The three export checkboxes as the value export_instance() takes."""
+        from .export import ExportOptions
+
+        return ExportOptions(
+            strip_documents=self.strip_embedded_documents,
+            skip_structured_reports=self.skip_structured_reports,
+            skip_files_without_image_data=self.skip_files_without_image_data,
+        )
+
+    def upload_temp_root(self) -> Path:
+        text = (self.xnat_upload_temp_dir or "").strip()
+        return Path(text) if text else Path(tempfile.gettempdir())
 
     @classmethod
     def load(cls, settings: QSettings) -> "AppSettings":
@@ -62,6 +90,10 @@ class AppSettings:
                 return value
             # QSettings hands back "true"/"false" strings on some platforms.
             return str(value).strip().lower() not in ("false", "0", "")
+
+        def as_text(key: str, fallback: str) -> str:
+            value = settings.value(key, fallback)
+            return "" if value is None else str(value)
 
         return cls(
             prefetch_ahead=as_int("prefetch/ahead", defaults.prefetch_ahead, 0, 32),
@@ -84,6 +116,14 @@ class AppSettings:
                 "export/skip_files_without_image_data",
                 defaults.skip_files_without_image_data,
             ),
+            xnat_upload_zip=as_bool("xnat_upload/zip_mode", defaults.xnat_upload_zip),
+            xnat_upload_temp_dir=as_text(
+                "xnat_upload/temp_dir", defaults.xnat_upload_temp_dir
+            ),
+            xnat_upload_max_concurrent=as_int(
+                "xnat_upload/max_concurrent", defaults.xnat_upload_max_concurrent,
+                MIN_CONCURRENT_UPLOADS, MAX_CONCURRENT_UPLOADS,
+            ),
         )
 
     def save(self, settings: QSettings) -> None:
@@ -102,4 +142,9 @@ class AppSettings:
         settings.setValue(
             "export/skip_files_without_image_data",
             self.skip_files_without_image_data,
+        )
+        settings.setValue("xnat_upload/zip_mode", self.xnat_upload_zip)
+        settings.setValue("xnat_upload/temp_dir", self.xnat_upload_temp_dir)
+        settings.setValue(
+            "xnat_upload/max_concurrent", self.xnat_upload_max_concurrent
         )

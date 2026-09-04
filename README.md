@@ -44,6 +44,10 @@ uv venv --python 3.12 && uv sync
 | `deid_app/decode_cache.py` | The two thread-safe LRU caches those workers share — decoded datasets, and rendered frames bounded by count *and* bytes |
 | `deid_app/redaction.py` | The de-identification itself — pixel data and overlays |
 | `deid_app/export.py` | Export worker: mirrors the input tree into the output tree |
+| `deid_app/xnat_settings.py`, `xnat_client.py`, `xnat_worker.py` | XNAT server/credentials, the login session on its own thread, and the project / session listings |
+| `deid_app/xnat_upload.py` | One upload job, no Qt: de-identify into a temp directory, zip or post, clean up |
+| `deid_app/xnat_upload_worker.py` | Upload jobs on their own threads and the queue that limits how many run at once |
+| `deid_app/xnat_pane.py` | XNAT server tab: project, study, session label, Upload, per-upload progress |
 | `deid_app/main_window.py` | Window assembly, tree, tabs, wiring |
 | `tests/` | Fixture generator, six headless GUI scripts, and two pytest-style unit modules |
 
@@ -231,6 +235,53 @@ directory discards them, and warns first.
 Everything — selections, commits, per-file results, and exceptions — is logged to the
 **Log** tab and to `~/dicompurge.log`.
 
+## Uploading to XNAT
+
+Set the server, user ID and password under the **XNAT Settings** menu, then press
+**XNAT Login**. On success the button reads `Logged in as <user>` and the **XNAT server**
+tab (after *Log*) fills its project list with the projects you may create subjects in.
+
+The tab lists every loaded **study** — one XNAT session each — with how many of its series
+still block it. A study can be uploaded once every series in it is `reviewed`, `committed`
+or `skipped`, exactly the rule Export applies. Pick a project (type part of its name or ID
+to filter the list), pick a study, accept or edit the **session label**, and press
+**Upload to XNAT**.
+
+- **Subject label** is the DICOM `PatientID`, reduced to letters, digits, `_` and `-`.
+- **Session label** defaults to `<PatientID>_<modality>_<n>` — the modality of the study's
+  first series, `n` counting from 1 per subject and skipping any label the project already
+  has. Edit it freely; *Default* puts the generated one back. A label already in the
+  project is refused before anything is sent.
+- The upload **de-identifies on the fly**: the study's files go through the same
+  redaction, document-stripping and skip rules as Export, into the temporary directory,
+  and it is that copy that is sent. Nothing under the input directory is uploaded as-is.
+- **Headers.** In zip mode the DICOM headers travel as they are; the subject and session
+  parameters decide where the files are filed. In individual-file mode XNAT's DICOM
+  receiver ignores those parameters and files by the headers — subject from `PatientName`,
+  session from `PatientID` — so the staged copy gets `PatientName := subject label` and
+  `PatientID := session label` before it is sent. Dates and every other tag are left
+  alone, and the input files and Export output are never modified.
+
+Two ways to send, chosen under **Settings → XNAT upload**:
+
+| Mode | Request | Lands in |
+| --- | --- | --- |
+| One zip per study (default) | one `POST /data/services/import` with `import-handler=DICOM-zip`, `Direct-Archive=true`, `Ignore-Unparsable=true` | the project **archive** (XNAT 1.8.3+; older servers leave it in the prearchive). Direct-Archive is asynchronous — the server builds the session in the background, a few minutes on a busy server — so the job stays in its *Archiving* phase until the session appears in the project, and reports `accepted (archiving in background)` if that takes longer than ten minutes |
+| Individual files | one POST per file with `import-handler=gradual-DICOM` and `dest=/prearchive/projects/<id>`; subject and session come from the rewritten headers | the **prearchive**, to review and archive in XNAT (unless the project auto-archives) |
+
+The same settings group sets the **temporary directory** (empty = the system one; it needs
+about twice the study's size free while an upload runs) and how many studies upload
+**at the same time** (1–8). Further uploads wait in the queue shown on the tab and start
+as slots free up; each running upload logs in with its own XNAT session. *Cancel* removes a
+waiting upload or stops a running one between files — a zip that is already being sent
+completes first. Quitting with uploads still running asks first.
+
+While you stay logged in, the uploads table keeps checking the server once a minute for
+every finished row that is not yet `archived`: a prearchive session shows its XNAT state
+(`in prearchive (receiving)`, `(ready)`, ...) and flips to `archived` once it lands in the
+project, whether the project auto-archived it or you archived it in XNAT. Logging out
+stops the checks.
+
 ## How the redaction works
 
 For every file in a series with boxes:
@@ -274,6 +325,15 @@ QT_QPA_PLATFORM=offscreen uv run python tests/test_load_dialog.py   # popup neve
 uv run python tests/test_overlay_display.py
 uv run python tests/test_embedded_document.py       # embedded PDFs never survive an export
 uv run python tests/test_skipped_series.py          # SR/document series are withheld and shown
+uv run python tests/test_xnat_settings.py           # login error wording, no password in the log
+uv run python tests/test_xnat_worker.py             # login/logout/listing signals against a fake session
+uv run python tests/test_xnat_upload_labels.py      # subject/session label rules
+uv run python tests/test_xnat_upload_job.py         # one upload job: staging, zip/individual calls, cleanup
+QT_QPA_PLATFORM=offscreen uv run python tests/test_xnat_upload_manager.py  # the concurrency limit and queue
+QT_QPA_PLATFORM=offscreen uv run python tests/test_xnat_pane.py            # the tab, end to end with fakes
+QT_QPA_PLATFORM=offscreen uv run python tests/test_xnat_login_button.py
+QT_QPA_PLATFORM=offscreen uv run python tests/test_xnat_shutdown.py        # logout on quit
+QT_QPA_PLATFORM=offscreen uv run python tests/test_upload_settings.py
 ```
 
 The last two build their own fixtures (`build_documents()` in `tests/make_fixtures.py`)

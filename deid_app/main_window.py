@@ -60,7 +60,10 @@ from .metadata_pane import MetadataPane
 from .model import Series, start_scan
 from .resources import LOGO_PATH, app_icon, logo_pixmap
 from .render import frame_count, read_dataset_header
+from .xnat_pane import XnatPane
 from .xnat_settings import XnatSettings
+from .xnat_upload import UploadRequest
+from .xnat_upload_worker import UploadManager
 from .xnat_worker import XnatWorker
 
 log = logging.getLogger(__name__)
@@ -105,6 +108,9 @@ class MainWindow(QMainWindow):
     prefetchRequested = Signal(object)
     xnatLoginRequested = Signal(object)
     xnatLogoutRequested = Signal()
+    xnatProjectsRequested = Signal()
+    xnatExperimentLabelsRequested = Signal(str)
+    xnatSessionCheckRequested = Signal(object)
 
     def __init__(self, bridge: LogBridge) -> None:
         super().__init__()
@@ -192,6 +198,10 @@ class MainWindow(QMainWindow):
         # Username the server confirmed, or None when not logged in.
         self._xnat_user: str | None = None
         self._xnat_busy = False
+        # Upload jobs, each on a thread of its own with its own XNAT session.
+        self._upload_manager = UploadManager(
+            self.app_settings.xnat_upload_max_concurrent, parent=self
+        )
 
         self._build_ui(bridge)
         self._load_recent_dirs()
@@ -264,6 +274,20 @@ class MainWindow(QMainWindow):
         self.log_pane = LogPane(bridge)
         self.log_pane.set_min_level(self.app_settings.gui_log_level)
         self.tabs.addTab(self.log_pane, "Log")
+        self.xnat_pane = XnatPane()
+        self.tabs.addTab(self.xnat_pane, "XNAT server")
+        self.xnat_pane.uploadRequested.connect(self._on_upload_requested)
+        self.xnat_pane.projectChanged.connect(self.xnatExperimentLabelsRequested)
+        self.xnat_pane.refreshProjectsRequested.connect(self.xnatProjectsRequested)
+        self.xnat_pane.statusCheckRequested.connect(self.xnatSessionCheckRequested)
+        self.xnat_pane.cancelRequested.connect(self._upload_manager.cancel)
+        self._upload_manager.started.connect(self.xnat_pane.set_job_started)
+        self._upload_manager.progress.connect(self.xnat_pane.set_job_progress)
+        self._upload_manager.finished.connect(self.xnat_pane.set_job_finished)
+        self._upload_manager.failed.connect(self.xnat_pane.set_job_failed)
+        self._upload_manager.cancelled.connect(self.xnat_pane.set_job_cancelled)
+        self._upload_manager.finished.connect(self._on_upload_finished)
+        self._upload_manager.failed.connect(self._on_upload_failed)
         self.tabs.currentChanged.connect(self._on_tab_changed)
         splitter.addWidget(self.tabs)
 
@@ -357,6 +381,9 @@ class MainWindow(QMainWindow):
             values.frame_cache_entries, values.frame_cache_mb * 1024 * 1024
         )
         self.log_pane.set_min_level(values.gui_log_level)
+        # Mode and temp directory are read when a job is queued; only the
+        # limit needs pushing, and raising it starts waiting jobs at once.
+        self._upload_manager.set_max_concurrent(values.xnat_upload_max_concurrent)
         # Either export checkbox can change which series are withheld, so the
         # tree has to be re-marked without waiting for a rescan.
         self._update_skipped_series()
@@ -399,6 +426,20 @@ class MainWindow(QMainWindow):
         self._xnat_worker.moveToThread(self._xnat_thread)
         self.xnatLoginRequested.connect(self._xnat_worker.login)
         self.xnatLogoutRequested.connect(self._xnat_worker.logout)
+        self.xnatProjectsRequested.connect(self._xnat_worker.fetch_projects)
+        self.xnatExperimentLabelsRequested.connect(
+            self._xnat_worker.fetch_experiment_labels
+        )
+        self._xnat_worker.projectsFetched.connect(self.xnat_pane.set_projects)
+        self._xnat_worker.projectsFailed.connect(self._on_xnat_projects_failed)
+        self._xnat_worker.experimentLabelsFetched.connect(
+            self.xnat_pane.set_existing_labels
+        )
+        self._xnat_worker.experimentLabelsFailed.connect(
+            self._on_xnat_labels_failed
+        )
+        self.xnatSessionCheckRequested.connect(self._xnat_worker.check_sessions)
+        self._xnat_worker.sessionsChecked.connect(self.xnat_pane.apply_session_status)
         self._xnat_worker.loggedIn.connect(self._on_xnat_logged_in)
         self._xnat_worker.loginFailed.connect(self._on_xnat_login_failed)
         self._xnat_worker.loggedOut.connect(self._on_xnat_logged_out)
@@ -427,6 +468,10 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         self.statusBar().showMessage(f"Logged in to XNAT as {user}")
         self._update_xnat_button()
+        self._upload_manager.set_credentials(self.xnat_settings)
+        self.xnat_pane.set_logged_in(user)
+        # The project list is what the XNAT server tab needs first.
+        self.xnatProjectsRequested.emit()
 
     @Slot(str)
     def _on_xnat_login_failed(self, message: str) -> None:
@@ -435,6 +480,8 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         self.statusBar().showMessage("XNAT login failed")
         self._update_xnat_button()
+        self._upload_manager.set_credentials(None)
+        self.xnat_pane.set_logged_in(None)
         QMessageBox.critical(self, "XNAT login failed", message)
 
     @Slot()
@@ -443,6 +490,58 @@ class MainWindow(QMainWindow):
         self._xnat_busy = False
         self.statusBar().showMessage("Logged out of XNAT")
         self._update_xnat_button()
+        self._upload_manager.set_credentials(None)
+        self.xnat_pane.set_logged_in(None)
+
+    @Slot(str)
+    def _on_xnat_projects_failed(self, message: str) -> None:
+        # Not modal: the tab shows the reason and offers Refresh; a dialog
+        # here would also block a headless login-then-quit.
+        self.xnat_pane.set_projects([])
+        self.xnat_pane.show_notice(message)
+        self.statusBar().showMessage(message)
+
+    @Slot(str, str)
+    def _on_xnat_labels_failed(self, project_id: str, message: str) -> None:
+        # Not fatal: defaults are computed against an empty list and the
+        # server will refuse a duplicate label at upload time.
+        self.statusBar().showMessage(f"{project_id}: {message}")
+
+    # -- XNAT upload -----------------------------------------------------
+    @Slot(str, str, str)
+    def _on_upload_requested(self, study_uid: str, project_id: str, label: str) -> None:
+        row = self.xnat_pane._row_by_uid.get(study_uid)
+        if row is None or self.input_root is None:
+            return
+        request = UploadRequest(
+            job_id=0,
+            project=project_id,
+            subject=row.subject_label,
+            session=label,
+            series=list(row.series),
+            input_root=self.input_root,
+            zip_mode=self.app_settings.xnat_upload_zip,
+            temp_root=self.app_settings.upload_temp_root(),
+            options=self.app_settings.export_options(),
+        )
+        try:
+            job_id = self._upload_manager.enqueue(request)
+        except RuntimeError as exc:
+            QMessageBox.warning(self, "Upload", str(exc))
+            return
+        self.xnat_pane.add_job(job_id, study_uid, row.subject_label, label, project_id)
+        self.statusBar().showMessage(
+            f"Upload {job_id} queued: {row.file_count} file(s) as {label} -> {project_id}"
+        )
+
+    @Slot(int, object)
+    def _on_upload_finished(self, job_id: int, result) -> None:
+        self.statusBar().showMessage(f"Upload {job_id} {result.describe()}")
+
+    @Slot(int, str)
+    def _on_upload_failed(self, job_id: int, message: str) -> None:
+        self.statusBar().showMessage(f"Upload {job_id} failed")
+        QMessageBox.warning(self, f"Upload {job_id} failed", message)
 
     def _update_xnat_button(self) -> None:
         """Login needs only a complete configuration."""
@@ -650,6 +749,7 @@ class MainWindow(QMainWindow):
         self.browse_button.setEnabled(True)
         self._populate_tree()
         self._update_skipped_series()
+        self.xnat_pane.set_series_map(series_map)
         count = len(series_map)
         files = sum(len(s.instances) for s in series_map.values())
         self.statusBar().showMessage(f"{count} series / {files} image(s) loaded")
@@ -695,6 +795,7 @@ class MainWindow(QMainWindow):
         self.reset_button.setEnabled(False)
         self.commit_button.setEnabled(False)
         self.boxes_label.setText("0 box(es)")
+        self.xnat_pane.set_series_map({})
         self._update_xnat_button()
 
     def _populate_tree(self) -> None:
@@ -1386,6 +1487,7 @@ class MainWindow(QMainWindow):
                 f"Export de-identified files... ({remaining} series not ready)"
             )
         self._update_xnat_button()
+        self.xnat_pane.refresh_readiness()
 
     # -- export ----------------------------------------------------------
     def export(self) -> None:
@@ -1512,6 +1614,18 @@ class MainWindow(QMainWindow):
 
     # -- lifecycle -------------------------------------------------------
     def closeEvent(self, event) -> None:
+        if self._upload_manager.busy:
+            n = self._upload_manager.running_count + self._upload_manager.pending_count
+            answer = QMessageBox.question(
+                self,
+                "Uploads in progress",
+                f"{n} upload(s) to XNAT are still running or waiting.\n"
+                "Quitting stops them; anything not yet sent is lost.\nQuit anyway?",
+            )
+            if answer != QMessageBox.Yes:
+                log.info("Quit cancelled: uploads still running")
+                event.ignore()
+                return
         self._close_load_dialog()
         for worker, thread in (
             (self._scan_worker, self._scan_thread),
@@ -1540,6 +1654,9 @@ class MainWindow(QMainWindow):
         QApplication.exit(), and aboutToQuit cannot veto a quit. Whichever runs
         first does the work; the second returns at the isRunning() guard.
         """
+        # Upload threads first: each holds a session of its own and a
+        # running job must not outlive the application.
+        self._upload_manager.shutdown()
         if self._xnat_thread is None or not self._xnat_thread.isRunning():
             return
         # Blocking rather than a plain emit: a queued logout races quit() and

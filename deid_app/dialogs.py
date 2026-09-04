@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import platform
+import tempfile
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QDesktopServices
@@ -11,19 +12,26 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLayout,
     QLineEdit,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from . import __version__
-from .app_settings import LOG_LEVELS, AppSettings
+from .app_settings import (
+    LOG_LEVELS,
+    MAX_CONCURRENT_UPLOADS,
+    MIN_CONCURRENT_UPLOADS,
+    AppSettings,
+)
 from .logging_setup import LOG_PATH
 from .resources import logo_pixmap
 from .xnat_settings import PASSWORD_WARNING, XnatSettings
@@ -194,6 +202,54 @@ class SettingsDialog(QDialog):
         export_form.addWidget(self.skip_no_image_check)
         layout.addWidget(export_box)
 
+        # XNAT upload -------------------------------------------------------
+        upload_box = QGroupBox("XNAT upload")
+        upload_box.setToolTip(
+            "How studies are sent from the XNAT server tab. Each upload "
+            "de-identifies its files into the temporary directory first, so "
+            "that directory needs roughly twice the study's size free while "
+            "an upload runs."
+        )
+        upload_form = QFormLayout(upload_box)
+        self.upload_mode_combo = QComboBox()
+        self.upload_mode_combo.addItem("One zip per study (straight to the archive)", True)
+        self.upload_mode_combo.addItem("Individual files (gradual-DICOM, to the prearchive)", False)
+        self.upload_mode_combo.setCurrentIndex(
+            max(0, self.upload_mode_combo.findData(current.xnat_upload_zip))
+        )
+        self.upload_mode_combo.setToolTip(
+            "Zip: the study is zipped and sent as one request with "
+            "Direct-Archive, so it appears in the project archive at once "
+            "(XNAT 1.8.3 or newer; older servers leave it in the prearchive).\n\n"
+            "Individual files: each file is posted separately and the session "
+            "is built in the prearchive, where it can be reviewed before "
+            "archiving. XNAT files these by the DICOM headers, so the sent "
+            "copies get PatientName = subject label and PatientID = session "
+            "label (the input files are not changed)."
+        )
+        upload_form.addRow("Upload as:", self.upload_mode_combo)
+
+        self.temp_dir_edit = QLineEdit(current.xnat_upload_temp_dir)
+        self.temp_dir_edit.setPlaceholderText(tempfile.gettempdir())
+        self.temp_dir_edit.setToolTip(
+            "Where the de-identified copies (and the zip) are written while a "
+            "study uploads. They are removed when the upload ends. Leave empty "
+            "to use the system temporary directory."
+        )
+        upload_form.addRow("Temporary directory:", self._directory_row(self.temp_dir_edit))
+
+        self.concurrent_spin = self._spin(
+            MIN_CONCURRENT_UPLOADS, MAX_CONCURRENT_UPLOADS,
+            current.xnat_upload_max_concurrent, " studies",
+        )
+        self.concurrent_spin.setToolTip(
+            "How many studies upload at the same time. Further uploads wait in "
+            "a queue until one finishes. Each running upload holds its own "
+            "XNAT session."
+        )
+        upload_form.addRow("Concurrent uploads:", self.concurrent_spin)
+        layout.addWidget(upload_box)
+
         # Recent directories ------------------------------------------------
         self.clear_recent_check = QCheckBox("Clear the list of recent input directories")
         self.clear_recent_check.setToolTip(
@@ -209,6 +265,23 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         buttons.button(QDialogButtonBox.RestoreDefaults).clicked.connect(self._restore_defaults)
         layout.addWidget(buttons)
+
+    def _directory_row(self, edit: QLineEdit) -> QWidget:
+        """A line edit with a Browse... button that fills it."""
+        row = QWidget()
+        box = QHBoxLayout(row)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.addWidget(edit, 1)
+        browse = QPushButton("Browse...")
+        browse.clicked.connect(lambda: self._browse_directory(edit))
+        box.addWidget(browse)
+        return row
+
+    def _browse_directory(self, edit: QLineEdit) -> None:
+        start = edit.text().strip() or edit.placeholderText() or ""
+        chosen = QFileDialog.getExistingDirectory(self, "Select a directory", start)
+        if chosen:
+            edit.setText(chosen)
 
     @staticmethod
     def _spin(low: int, high: int, value: int, suffix: str) -> QSpinBox:
@@ -230,6 +303,11 @@ class SettingsDialog(QDialog):
         self.strip_docs_check.setChecked(defaults.strip_embedded_documents)
         self.skip_sr_check.setChecked(defaults.skip_structured_reports)
         self.skip_no_image_check.setChecked(defaults.skip_files_without_image_data)
+        self.upload_mode_combo.setCurrentIndex(
+            max(0, self.upload_mode_combo.findData(defaults.xnat_upload_zip))
+        )
+        self.temp_dir_edit.setText(defaults.xnat_upload_temp_dir)
+        self.concurrent_spin.setValue(defaults.xnat_upload_max_concurrent)
 
     @property
     def values(self) -> AppSettings:
@@ -243,6 +321,9 @@ class SettingsDialog(QDialog):
             strip_embedded_documents=self.strip_docs_check.isChecked(),
             skip_structured_reports=self.skip_sr_check.isChecked(),
             skip_files_without_image_data=self.skip_no_image_check.isChecked(),
+            xnat_upload_zip=bool(self.upload_mode_combo.currentData()),
+            xnat_upload_temp_dir=self.temp_dir_edit.text().strip(),
+            xnat_upload_max_concurrent=self.concurrent_spin.value(),
         )
 
     @property

@@ -111,3 +111,48 @@ def open_session(cfg: XnatSettings):
         logger=xnat_log,
         default_timeout=300.0,
     )
+
+
+# -- listing what the server holds ---------------------------------------------
+# Both parsers take the raw JSON of an XNAT "ResultSet" so they can be tested
+# without a session. The queries that produce them live in XnatWorker.
+
+def _result_rows(payload) -> list[dict]:
+    try:
+        rows = payload["ResultSet"]["Result"]
+    except (KeyError, TypeError):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def parse_projects(payload) -> list[tuple[str, str]]:
+    """[(id, display name)] sorted by name, from GET /data/projects."""
+    projects: dict[str, str] = {}
+    for row in _result_rows(payload):
+        pid = str(row.get("ID") or row.get("id") or "").strip()
+        if not pid:
+            continue
+        name = str(row.get("name") or row.get("secondary_ID") or pid).strip()
+        projects[pid] = name or pid
+    return sorted(projects.items(), key=lambda item: (item[1].lower(), item[0]))
+
+
+def parse_experiment_labels(payload) -> set[str]:
+    """Session labels in a project, from GET /data/projects/{id}/experiments."""
+    labels: set[str] = set()
+    for row in _result_rows(payload):
+        label = str(row.get("label") or "").strip()
+        if label:
+            labels.add(label)
+    return labels
+
+
+# The XNAT Desktop Client asks for exactly the projects the user may create
+# subjects in (services/xnat-api.js). Older servers ignore or reject the
+# filter, hence the plain fallback in XnatWorker.fetch_projects.
+PROJECTS_QUERY = {
+    "permissions": "edit",
+    "dataType": "xnat:subjectData",
+    "columns": "ID,name,secondary_ID",
+}
+EXPERIMENTS_COLUMNS = {"columns": "ID,label"}

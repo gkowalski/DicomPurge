@@ -147,5 +147,121 @@ check("s3cret" not in written, "no password in the log on success or failure")
 check("typedName" in written, "the username is logged, so the entries stay useful")
 
 print()
+print("listing projects and sessions")
+
+
+class ListingSession(FakeSession):
+    def __init__(self, reject_filter=False):
+        super().__init__()
+        self.queries = []
+        self.reject_filter = reject_filter
+
+    def get_json(self, path, query=None):
+        self.queries.append((path, dict(query or {})))
+        if path == "/data/projects":
+            if self.reject_filter and "permissions" in (query or {}):
+                raise RuntimeError("400 unknown parameter")
+            return {"ResultSet": {"Result": [
+                {"ID": "zeta", "name": "Zeta study", "secondary_ID": "Z"},
+                {"ID": "alpha", "name": "", "secondary_ID": "Alpha"},
+                {"ID": "", "name": "no id"},
+            ]}}
+        if path == "/data/projects/zeta/experiments":
+            return {"ResultSet": {"Result": [
+                {"ID": "X1", "label": "S1_MR_1"}, {"ID": "X2", "label": "S1_MR_2"},
+                {"ID": "X3", "label": ""},
+            ]}}
+        raise RuntimeError(f"404 {path}")
+
+
+def listing_collector(worker):
+    events = []
+    worker.projectsFetched.connect(lambda p: events.append(("projects", p)))
+    worker.projectsFailed.connect(lambda m: events.append(("projectsFailed", m)))
+    worker.experimentLabelsFetched.connect(lambda pid, s: events.append(("labels", pid, s)))
+    worker.experimentLabelsFailed.connect(lambda pid, m: events.append(("labelsFailed", pid, m)))
+    return events
+
+
+worker8 = xw.XnatWorker()
+ev = listing_collector(worker8)
+worker8.fetch_projects()
+worker8.fetch_experiment_labels("zeta")
+check(ev == [("projectsFailed", "Not logged in to XNAT."),
+             ("labelsFailed", "zeta", "Not logged in to XNAT.")],
+      f"both listings fail cleanly when not logged in (got {ev})")
+
+listing = ListingSession()
+xw.open_session = lambda cfg: listing
+worker8.login(COMPLETE)
+ev.clear()
+worker8.fetch_projects()
+check(ev == [("projects", [("alpha", "Alpha"), ("zeta", "Zeta study")])],
+      f"projects sorted by name, secondary_ID used when name is blank, blank ids dropped (got {ev})")
+check(listing.queries[-1][1].get("permissions") == "edit"
+      and listing.queries[-1][1].get("dataType") == "xnat:subjectData",
+      "asks only for projects the user can create subjects in")
+ev.clear()
+worker8.fetch_experiment_labels("zeta")
+check(ev == [("labels", "zeta", {"S1_MR_1", "S1_MR_2"})], f"session labels as a set (got {ev})")
+ev.clear()
+worker8.fetch_experiment_labels("nope")
+check(ev and ev[0][0] == "labelsFailed" and ev[0][1] == "nope" and "404" in ev[0][2],
+      f"a server error is reported with its text (got {ev})")
+
+strict = ListingSession(reject_filter=True)
+xw.open_session = lambda cfg: strict
+worker9 = xw.XnatWorker()
+ev9 = listing_collector(worker9)
+worker9.login(COMPLETE)
+worker9.fetch_projects()
+check(ev9 and ev9[-1][0] == "projects" and len(ev9[-1][1]) == 2,
+      "an older server that rejects the filter still yields the plain listing")
+check(len(strict.queries) == 2 and "permissions" not in strict.queries[-1][1],
+      "the fallback query drops the filter")
+print()
+print("checking where uploaded sessions stand")
+
+
+class CheckSession(ListingSession):
+    def get_json(self, path, query=None):
+        self.queries.append((path, dict(query or {})))
+        if path == "/data/projects/zeta/experiments":
+            return {"ResultSet": {"Result": [{"ID": "X1", "label": "S1_MR_1"}]}}
+        if path == "/data/prearchive/projects/zeta":
+            return {"ResultSet": {"Result": [{"name": "S1_MR_2", "status": "READY"},
+                                             {"name": "S1_MR_3", "status": "RECEIVING"}]}}
+        if path == "/data/projects/broken/experiments":
+            raise RuntimeError("500")
+        return super().get_json(path, query)
+
+
+checked = []
+worker10 = xw.XnatWorker()
+worker10.sessionsChecked.connect(lambda d: checked.append(dict(d)))
+worker10.check_sessions([("zeta", "S1_MR_1")])
+check(checked == [], "silent when not logged in")
+cs = CheckSession()
+xw.open_session = lambda cfg: cs
+worker10.login(COMPLETE)
+worker10.check_sessions([("zeta", "S1_MR_1"), ("zeta", "S1_MR_2"), ("zeta", "S1_MR_3"),
+                         ("zeta", "S1_MR_9"), ("broken", "X")])
+check(checked == [{("zeta", "S1_MR_1"): "archived", ("zeta", "S1_MR_2"): "prearchive:READY",
+                   ("zeta", "S1_MR_3"): "prearchive:RECEIVING", ("zeta", "S1_MR_9"): "missing"}],
+      f"archived / prearchive with its status / missing, and a failing project is left out (got {checked})")
+paths = [q[0] for q in cs.queries]
+check(paths.count("/data/projects/zeta/experiments") == 1 and paths.count("/data/prearchive/projects/zeta") == 1,
+      "one archive query and one prearchive query per project, not per label")
+checked.clear()
+worker10.check_sessions([("zeta", "S1_MR_1")])
+check(checked == [{("zeta", "S1_MR_1"): "archived"}] and paths.count("/data/prearchive/projects/zeta") == 1
+      or [q[0] for q in cs.queries].count("/data/prearchive/projects/zeta") == 1,
+      "the prearchive is not queried when every label is already archived")
+worker10.logout()
+
+worker8.logout()
+worker9.logout()
+
+print()
 print("ALL XNAT WORKER CHECKS PASSED" if not failures else f"{len(failures)} FAILURE(S): {failures}")
 sys.exit(1 if failures else 0)

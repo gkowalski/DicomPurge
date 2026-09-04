@@ -164,3 +164,6 @@ cython_debug/
 
 /_x/
 /xnat_upload_test.py
+
+# macOS Finder metadata, in every directory
+.DS_Store

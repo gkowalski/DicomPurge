@@ -344,6 +344,26 @@ Each of those is a standalone script that prints `PASS`/`FAIL` per check and exi
 non-zero on failure. `tests/test_render.py` and `tests/test_sr_render.py` are plain
 pytest-style modules of unit tests instead.
 
+## License
+
+DicomPurge is released under the **GNU General Public License v3.0** (see `LICENSE`).
+That choice follows from its dependencies: `pylibjpeg-libjpeg`, which decodes JPEG,
+JPEG-LS and JPEG XT, is GPL-3.0-only, so the combined work is too. Redistributions must
+carry this license and make the corresponding source available.
+
+`THIRD_PARTY_NOTICES.md` lists every runtime dependency with its license and reproduces
+the license texts, as those licenses require. Regenerate it after changing dependencies:
+
+```bash
+uv run python tools/generate_third_party_notices.py
+```
+
+Two dependencies carry obligations beyond attribution, both explained at the top of that
+file: **PySide6/shiboken6** (LGPL-3.0 - keep it a separately replaceable package, ship the
+license text) and **pylibjpeg-libjpeg** (GPL-3.0 - a copyleft license; any release of
+DicomPurge that includes it must itself be GPL-3.0 with source available, or drop that
+plugin).
+
 ## Credits
 - Developed by the **CTSI of SE WI**
 - If you utilize CTSI resources, please cite the **NIH CTSA; 2UL1TR001436, 2TL1TR001437, 2KL2TR001438** and acknowledge support.

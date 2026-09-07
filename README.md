@@ -298,7 +298,12 @@ For every file in a series with boxes:
 - **Compressed input (JPEG etc.)** — the frame cannot be edited in place, so the file is
   decoded and rewritten as Explicit VR Little Endian. `YBR_*` data is normalised to `RGB`
   (so that 0,0,0 really is black) and `PhotometricInterpretation` / `PlanarConfiguration`
-  are updated to match. This is logged per file.
+  are updated to match. This is logged per file. See
+  [Transfer syntaxes](#transfer-syntaxes) for what can be decoded.
+- **`PALETTE COLOR`** images are blanked with the darkest entry in their palette rather
+  than index 0 (which is white in some palettes); the palette itself is kept.
+- **Explicit VR Big Endian** input is rewritten as Explicit VR Little Endian, like
+  compressed input; the sample values are unchanged.
 - `(0028,0301) BurnedInAnnotation` is set to `NO` on redacted files.
 
 Series with no boxes are copied through byte-for-byte — except files carrying an
@@ -307,6 +312,37 @@ embedded document, which are rewritten so the document can be removed (see
 
 Boxes are stored as fractions of the image (0–1), not screen pixels, so they are immune
 to window resizing and to instances within a series having different dimensions.
+
+### Transfer syntaxes
+
+**Reading.** Every image transfer syntax DICOM defines can be displayed and redacted,
+except video. Decoding is done by pydicom with these plugins:
+
+| Transfer syntax | Decoded by |
+| --- | --- |
+| Implicit / Explicit VR Little Endian, Deflated, Explicit VR Big Endian | pydicom |
+| RLE Lossless | pydicom |
+| JPEG Baseline (8-bit), JPEG Extended (12-bit) | Pillow or pylibjpeg-libjpeg |
+| JPEG Lossless (Process 14) and Lossless SV1 (Process 14, SV1) | pylibjpeg-libjpeg |
+| JPEG-LS Lossless and Near-Lossless | pylibjpeg-libjpeg |
+| JPEG 2000 Lossless and Lossy | Pillow (OpenJPEG) or pylibjpeg-openjpeg |
+| High-Throughput JPEG 2000 (HTJ2K), all three variants | pylibjpeg-openjpeg |
+
+Not decodable, because no Python decoder exists for them: JPEG 2000 Part 2
+multi-component, JPIP, MPEG-2 / MPEG-4 / HEVC video, and SMPTE ST 2110 video and audio.
+Such files show as *Uneditable File*, cannot take boxes, and are copied through unchanged
+on export (or withheld with *Skip files with no image data* — see
+[Files boxes cannot de-identify](#files-boxes-cannot-de-identify)).
+
+**Writing.** A redacted file is always written **uncompressed, as Explicit VR Little
+Endian**. Nothing is re-compressed: a JPEG 2000 or JPEG-LS study grows to its raw pixel
+size on export, and a lossy-compressed image becomes an uncompressed copy of its decoded
+pixels — no further generation loss from this point on. Files that were not redacted keep
+their original transfer syntax, since they are copied byte-for-byte.
+
+Note that the JPEG Lossless, JPEG Extended and JPEG-LS rows depend on
+`pylibjpeg-libjpeg`, which is GPL-3.0 — the reason DicomPurge is itself GPL-3.0 (see
+[License](#license)).
 
 **Scope note:** this tool redacts *pixels and overlays*, and removes embedded documents
 that pixels cannot cover. It does **not** scrub identifying DICOM metadata (patient name,
@@ -318,6 +354,7 @@ with a tag-level de-identification step if you need PS3.15 Annex E conformance.
 ```bash
 uv run python tests/make_fixtures.py /tmp/fixtures   # synthetic mono / RGB multiframe / JPEG + overlays
 uv run python tests/test_redaction.py                # verifies pixels + overlay bits are zeroed
+uv run python tests/test_redaction_syntaxes.py       # big-endian, deflated, RLE and PALETTE COLOR input
 QT_QPA_PLATFORM=offscreen uv run python tests/test_gui_smoke.py
 QT_QPA_PLATFORM=offscreen uv run python tests/test_metadata_pane.py
 QT_QPA_PLATFORM=offscreen uv run python tests/test_commit_shortcut.py

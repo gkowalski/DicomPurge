@@ -14,7 +14,7 @@ import logging
 import numpy as np
 import pydicom
 from pydicom.dataset import Dataset
-from pydicom.uid import ExplicitVRLittleEndian
+from pydicom.uid import ExplicitVRBigEndian, ExplicitVRLittleEndian
 
 from .compat import convert_color_space
 from .overlays import overlay_groups, read_overlay
@@ -43,9 +43,39 @@ def _boxes_to_pixels(boxes, rows: int, columns: int) -> list[tuple[int, int, int
     return out
 
 
+def _darkest_palette_index(ds: Dataset) -> int | None:
+    """The PALETTE COLOR index whose entry is darkest, or None if unreadable.
+
+    Index 0 is whatever the palette says it is - white, in some CT palettes -
+    so blanking with 0 would draw a bright box. Any solid colour hides the
+    text; the darkest one also looks like a redaction.
+    """
+    try:
+        descriptor = [int(v) for v in ds.RedPaletteColorLookupTableDescriptor]
+        entries, first, bits = descriptor[0] or 65536, descriptor[1], descriptor[2]
+        dtype = np.uint16 if bits > 8 else np.uint8
+        channels = []
+        for colour in ("Red", "Green", "Blue"):
+            raw = getattr(ds, f"{colour}PaletteColorLookupTableData")
+            arr = np.frombuffer(raw, dtype=dtype)[:entries].astype(np.int64)
+            channels.append(arr)
+        n = min(len(c) for c in channels)
+        if n == 0:
+            return None
+        luminance = sum(c[:n] for c in channels)
+        return int(first + int(np.argmin(luminance)))
+    except Exception as exc:  # noqa: BLE001 - fall back to index 0
+        log.warning("Could not read the colour palette (%s); using index 0", exc)
+        return None
+
+
 def _fill_value(ds: Dataset, dtype) -> int:
     """The sample value that renders as black for this photometric interpretation."""
     photometric = str(getattr(ds, "PhotometricInterpretation", "MONOCHROME2")).upper()
+    if photometric == "PALETTE COLOR":
+        index = _darkest_palette_index(ds)
+        if index is not None:
+            return index
     if photometric == "MONOCHROME1":
         # In MONOCHROME1 the maximum stored value displays as black.
         bits_stored = int(getattr(ds, "BitsStored", getattr(ds, "BitsAllocated", 8)) or 8)
@@ -86,9 +116,17 @@ def _apply_to_pixel_data(ds: Dataset, boxes) -> int:
         log.warning("No PixelData (7FE0,0010) in dataset - nothing to blank")
         return 0
 
-    was_compressed = bool(ds.file_meta.TransferSyntaxUID.is_compressed)
+    syntax = ds.file_meta.TransferSyntaxUID
+    was_compressed = bool(syntax.is_compressed)
+    # The pixel bytes written below are in native (little-endian) order, so
+    # a big-endian file must be rewritten as little-endian or every sample
+    # outside the box comes back byte-swapped.
+    was_big_endian = syntax == ExplicitVRBigEndian
     arr = ds.pixel_array
-    arr = np.array(arr, copy=True)
+    # Native byte order: a big-endian file decodes to a '>u2' array, and
+    # tobytes() on that would put big-endian samples into the little-endian
+    # file written below.
+    arr = np.array(arr, dtype=arr.dtype.newbyteorder("="), copy=True)
     arr = _normalise_colour(ds, arr)
 
     rows = int(ds.Rows)
@@ -106,10 +144,11 @@ def _apply_to_pixel_data(ds: Dataset, boxes) -> int:
 
     arr = view.reshape(arr.shape)
 
-    if was_compressed:
+    if was_compressed or was_big_endian:
         ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
         log.info(
-            "Transfer syntax was compressed; re-encoding as Explicit VR Little Endian"
+            "Transfer syntax was %s; re-encoding as Explicit VR Little Endian",
+            "compressed" if was_compressed else "Explicit VR Big Endian",
         )
     ds.PixelData = arr.tobytes()
     ds["PixelData"].is_undefined_length = False
@@ -204,9 +243,29 @@ def _save(ds: Dataset, dst) -> None:
 
     params = inspect.signature(Dataset.save_as).parameters
     if "enforce_file_format" in params:
+        _allow_endian_change(ds)
         ds.save_as(str(dst), enforce_file_format=True)
     else:  # pragma: no cover - pydicom 2.x
         ds.save_as(str(dst), write_like_original=False)
+
+
+def _allow_endian_change(ds: Dataset) -> None:
+    """Let a big-endian file be written little-endian (pydicom 3).
+
+    save_as() refuses to change endianness because elements not yet decoded
+    are still raw big-endian bytes. Touching every element decodes it (each
+    raw element remembers its own byte order), after which the dataset can
+    honestly be declared little-endian and written that way.
+    """
+    original = getattr(ds, "original_encoding", None)
+    if not original or original[1] is not False:
+        return  # already little-endian, or not a file-backed dataset
+    if not ds.file_meta.TransferSyntaxUID.is_little_endian:
+        return
+    for _elem in ds.iterall():  # decoding happens on access
+        pass
+    ds.set_original_encoding(original[0], True)
+    log.debug("Converted dataset encoding from big to little endian for writing")
 
 
 def redact_file(src, dst, boxes, strip_documents: bool = False) -> dict:

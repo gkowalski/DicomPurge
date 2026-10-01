@@ -9,12 +9,16 @@ from pathlib import Path
 
 import numpy as np
 import pydicom
+from pydicom.uid import JPEGBaseline8Bit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from deid_app.redaction import redact_file  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
+
+# JPEG Baseline is lossy: a re-encoded block is "black" only within this many levels.
+JPEG_TOLERANCE = 12
 
 BOX = (0.25, 0.25, 0.25, 0.25)  # centre-ish quarter
 OUT = Path("/tmp/fixtures_out")
@@ -62,20 +66,39 @@ def main():
         r0, r1 = int(0.25 * rows), int(0.5 * rows)
         c0, c1 = int(0.25 * cols), int(0.5 * cols)
 
+        original_syntax = pydicom.dcmread(str(src), stop_before_pixels=True).file_meta.TransferSyntaxUID
+        lossy = original_syntax == JPEGBaseline8Bit
+        tolerance = JPEG_TOLERANCE if lossy else 0
+
         inside = arr[:, r0:r1, c0:c1, :]
-        check(int(inside.max()) == 0, f"pixel data blanked inside box (max={inside.max()})")
+        check(
+            int(inside.max()) <= tolerance,
+            f"pixel data blanked inside box (max={inside.max()})",
+        )
 
         outside = arr.copy()
         outside[:, r0:r1, c0:c1, :] = 0
-        check(int(outside.max()) > 0, "pixel data outside the box preserved")
+        check(int(outside.max()) > tolerance, "pixel data outside the box preserved")
 
         check(str(ds.BurnedInAnnotation) == "NO", "BurnedInAnnotation set to NO")
-        check(
-            not ds.file_meta.TransferSyntaxUID.is_compressed,
-            f"written uncompressed ({ds.file_meta.TransferSyntaxUID.name})",
-        )
-        if str(getattr(ds, "PhotometricInterpretation", "")).startswith("YBR"):
-            check(False, "photometric interpretation left as YBR")
+        if lossy:
+            check(
+                ds.file_meta.TransferSyntaxUID == JPEGBaseline8Bit,
+                f"JPEG Baseline stays JPEG Baseline ({ds.file_meta.TransferSyntaxUID.name})",
+            )
+            check(str(ds.LossyImageCompression) == "01", "Lossy Image Compression flagged")
+            methods = ds.LossyImageCompressionMethod
+            methods = [methods] if isinstance(methods, str) else list(methods)
+            check("ISO_10918_1" in methods, "Lossy Image Compression Method names ISO_10918_1")
+            check(str(ds.PhotometricInterpretation).startswith("YBR_FULL"),
+                  f"JPEG photometric is YBR ({ds.PhotometricInterpretation})")
+        else:
+            check(
+                not ds.file_meta.TransferSyntaxUID.is_compressed,
+                f"written uncompressed ({ds.file_meta.TransferSyntaxUID.name})",
+            )
+            if str(getattr(ds, "PhotometricInterpretation", "")).startswith("YBR"):
+                check(False, "photometric interpretation left as YBR")
 
         original = pydicom.dcmread(str(src))
         for group in (0x6000, 0x6002, 0x6004):

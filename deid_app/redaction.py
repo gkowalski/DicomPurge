@@ -9,12 +9,24 @@ byte-for-byte unchanged.
 """
 from __future__ import annotations
 
+import io
 import logging
 
 import numpy as np
 import pydicom
 from pydicom.dataset import Dataset
-from pydicom.uid import ExplicitVRBigEndian, ExplicitVRLittleEndian
+from pydicom.uid import (
+    ExplicitVRBigEndian,
+    ExplicitVRLittleEndian,
+    JPEG2000,
+    JPEG2000Lossless,
+    JPEGBaseline8Bit,
+    JPEGLosslessSV1,
+    JPEGLossless,
+    JPEGLSLossless,
+    JPEGLSNearLossless,
+    RLELossless,
+)
 
 from .compat import convert_color_space
 from .overlays import overlay_groups, read_overlay
@@ -24,6 +36,17 @@ log = logging.getLogger(__name__)
 # pydicom 3 already returns RGB for YBR source data; pydicom 2 does not.
 PYDICOM_MAJOR = int(str(pydicom.__version__).split(".")[0])
 
+# JPEG Baseline is lossy, so re-encoding a redacted file adds one generation of
+# loss. Every other syntax below is re-encoded losslessly.
+JPEG_BASELINE_QUALITY = 95
+
+# Syntaxes that go back out as JPEG 2000 Lossless: JPEG 2000 itself (a lossy
+# source takes no further loss) and the lossless JPEG families, which have no
+# encoder available here.
+_AS_JPEG2000_LOSSLESS = frozenset(
+    {JPEG2000, JPEG2000Lossless, JPEGLossless, JPEGLosslessSV1, JPEGLSLossless, JPEGLSNearLossless}
+)
+_ISO_10918_1 = "ISO_10918_1"
 
 
 def _boxes_to_pixels(boxes, rows: int, columns: int) -> list[tuple[int, int, int, int]]:
@@ -110,6 +133,94 @@ def _normalise_colour(ds: Dataset, arr: np.ndarray) -> np.ndarray:
     return arr
 
 
+def _mark_lossy_jpeg(ds: Dataset) -> None:
+    """Record in (0028,2110)/(0028,2114) that the pixel data is JPEG-compressed."""
+    ds.LossyImageCompression = "01"
+    methods = ds.get("LossyImageCompressionMethod")
+    if methods is None:
+        methods = []
+    elif isinstance(methods, str):
+        methods = [methods]
+    else:
+        methods = [str(m) for m in methods]
+    if _ISO_10918_1 not in methods:
+        methods.append(_ISO_10918_1)
+    ds.LossyImageCompressionMethod = methods if len(methods) > 1 else methods[0]
+
+
+def _encode_jpeg_baseline(ds: Dataset, arr: np.ndarray, source_photometric: str) -> bool:
+    """Re-encode `arr` as JPEG Baseline with Pillow. False if it does not fit."""
+    from PIL import Image
+    from pydicom.encaps import encapsulate
+
+    samples = int(getattr(ds, "SamplesPerPixel", 1) or 1)
+    photometric = str(getattr(ds, "PhotometricInterpretation", "")).upper()
+    if arr.dtype != np.uint8 or int(ds.BitsAllocated) != 8:
+        return False
+    if samples == 3 and photometric == "RGB":
+        full_resolution = source_photometric == "YBR_FULL"
+        subsampling = 0 if full_resolution else 1  # 4:4:4 or 4:2:2
+        new_photometric = "YBR_FULL" if full_resolution else "YBR_FULL_422"
+        mode = "RGB"
+    elif samples == 1 and photometric in ("MONOCHROME1", "MONOCHROME2"):
+        # Palette indices would be mangled by a lossy codec, so those never get here.
+        subsampling, new_photometric, mode = None, photometric, "L"
+    else:
+        return False
+
+    rows, columns = int(ds.Rows), int(ds.Columns)
+    frames = arr.reshape(-1, rows, columns, samples)
+    encoded = []
+    for frame in frames:
+        image = Image.fromarray(frame if samples == 3 else frame[..., 0], mode)
+        buffer = io.BytesIO()
+        options = {"quality": JPEG_BASELINE_QUALITY}
+        if subsampling is not None:
+            options["subsampling"] = subsampling
+        image.save(buffer, "JPEG", **options)
+        encoded.append(buffer.getvalue())
+
+    ds.PixelData = encapsulate(encoded, has_bot=True)
+    ds["PixelData"].VR = "OB"
+    ds["PixelData"].is_undefined_length = True
+    ds.PhotometricInterpretation = new_photometric
+    ds.file_meta.TransferSyntaxUID = JPEGBaseline8Bit
+    _mark_lossy_jpeg(ds)
+    return True
+
+
+def _recompress(ds: Dataset, arr: np.ndarray, original_syntax, source_photometric: str = "") -> bool:
+    """Write `arr` back out in (a lossless stand-in for) `original_syntax`.
+
+    Sets PixelData, TransferSyntaxUID and PhotometricInterpretation and returns
+    True. Returns False - leaving those tags as they were - when the syntax has
+    no encoder or encoding fails, and the caller falls back to uncompressed.
+    """
+    if PYDICOM_MAJOR < 3:
+        return False
+    photometric = ds.get("PhotometricInterpretation")
+    try:
+        if original_syntax == JPEGBaseline8Bit:
+            return _encode_jpeg_baseline(ds, arr, source_photometric)
+        if original_syntax == RLELossless:
+            target = RLELossless
+        elif original_syntax in _AS_JPEG2000_LOSSLESS:
+            target = JPEG2000Lossless
+        else:
+            return False
+        from pydicom.pixels import compress
+
+        compress(ds, target, arr=arr)
+        ds["PixelData"].is_undefined_length = True
+        return True
+    except Exception as exc:  # noqa: BLE001 - any encoder problem means "write uncompressed"
+        log.warning("Could not re-encode as %s (%s)", original_syntax.name, exc)
+        ds.file_meta.TransferSyntaxUID = original_syntax
+        if photometric is not None:
+            ds.PhotometricInterpretation = photometric
+        return False
+
+
 def _apply_to_pixel_data(ds: Dataset, boxes) -> int:
     """Blank the boxes in (7FE0,0010). Returns the number of frames touched."""
     if "PixelData" not in ds:
@@ -122,6 +233,7 @@ def _apply_to_pixel_data(ds: Dataset, boxes) -> int:
     # a big-endian file must be rewritten as little-endian or every sample
     # outside the box comes back byte-swapped.
     was_big_endian = syntax == ExplicitVRBigEndian
+    source_photometric = str(getattr(ds, "PhotometricInterpretation", "")).upper()
     arr = ds.pixel_array
     # Native byte order: a big-endian file decodes to a '>u2' array, and
     # tobytes() on that would put big-endian samples into the little-endian
@@ -144,14 +256,24 @@ def _apply_to_pixel_data(ds: Dataset, boxes) -> int:
 
     arr = view.reshape(arr.shape)
 
-    if was_compressed or was_big_endian:
-        ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    if was_compressed and _recompress(ds, arr, syntax, source_photometric):
         log.info(
-            "Transfer syntax was %s; re-encoding as Explicit VR Little Endian",
-            "compressed" if was_compressed else "Explicit VR Big Endian",
+            "Transfer syntax was %s; re-encoded as %s",
+            syntax.name,
+            ds.file_meta.TransferSyntaxUID.name,
         )
-    ds.PixelData = arr.tobytes()
-    ds["PixelData"].is_undefined_length = False
+    else:
+        if was_compressed:
+            log.warning(
+                "Transfer syntax was %s; writing Explicit VR Little Endian (uncompressed)",
+                syntax.name,
+            )
+        elif was_big_endian:
+            log.info("Transfer syntax was Explicit VR Big Endian; re-encoding as Explicit VR Little Endian")
+        if was_compressed or was_big_endian:
+            ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+        ds.PixelData = arr.tobytes()
+        ds["PixelData"].is_undefined_length = False
     ds.BitsAllocated = int(ds.BitsAllocated)
     return frames
 

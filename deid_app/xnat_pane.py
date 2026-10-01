@@ -564,7 +564,7 @@ class XnatPane(QWidget):
             bar.setRange(0, 0)
             bar.setFormat("starting...")
 
-    @Slot(int, int, int, str)
+    @Slot(int, object, object, str)
     def set_job_progress(self, job_id: int, done: int, total: int, phase: str) -> None:
         bar = self._bar(job_id)
         if bar is None:
@@ -573,8 +573,10 @@ class XnatPane(QWidget):
             bar.setRange(0, 0)
             bar.setFormat(f"{phase}...")
             return
-        bar.setRange(0, total)
-        bar.setValue(done)
+        # QProgressBar takes C ints; a zip over 2 GiB has to be shown in KiB.
+        unit = 1 if total <= 0x7FFFFFFF else 1024
+        bar.setRange(0, total // unit)
+        bar.setValue(min(done // unit, total // unit))
         if phase == "Uploading" and total > 100000:
             bar.setFormat(f"{phase} %p% ({done // 1024 // 1024} / {total // 1024 // 1024} MB)")
         else:

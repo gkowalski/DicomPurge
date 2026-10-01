@@ -1,7 +1,8 @@
 """Headless check: redaction across transfer syntaxes and photometric types.
 
 Big Endian, Deflated and RLE input must come back with the box blanked AND
-every other sample intact; PALETTE COLOR must blank with the darkest entry,
+every other sample intact; compressed input must stay compressed (RLE as RLE,
+JPEG 2000 as JPEG 2000 Lossless) and not balloon to the uncompressed size; PALETTE COLOR must blank with the darkest entry,
 not blindly with index 0.
 """
 from __future__ import annotations
@@ -18,6 +19,8 @@ from pydicom.uid import (
     DeflatedExplicitVRLittleEndian,
     ExplicitVRBigEndian,
     ExplicitVRLittleEndian,
+    JPEG2000,
+    JPEG2000Lossless,
     RLELossless,
     generate_uid,
 )
@@ -82,14 +85,48 @@ for ts, name in ((ExplicitVRBigEndian, "big_endian"),
     else:
         check(ds.file_meta.TransferSyntaxUID == ts, f"{name}: transfer syntax kept")
 
-print("rle")
-src = pydicom.dcmread(mono16(ExplicitVRLittleEndian, "rle_src"))
-compress(src, RLELossless)
-rle = OUT / "rle.dcm"
-src.save_as(rle, enforce_file_format=True)
-ds, arr = roundtrip(rle)
-check(int(arr[8:24, 8:24].max()) == 0 and int(arr[0, 0]) == 1000, "rle: decoded, blanked, rest intact")
-check(ds.file_meta.TransferSyntaxUID == ExplicitVRLittleEndian, "rle: written uncompressed")
+def smooth_multiframe(name, frames=6, size=128):
+    """A compressible 16-bit multiframe image: a smooth ramp, different per frame."""
+    ds = _base(size, size, generate_uid(), 1, name)
+    ds.InstanceNumber = 1
+    ds.SamplesPerPixel = 1
+    ds.PhotometricInterpretation = "MONOCHROME2"
+    ds.BitsAllocated, ds.BitsStored, ds.HighBit, ds.PixelRepresentation = 16, 12, 11, 0
+    ds.NumberOfFrames = frames
+    ramp = np.add.outer(np.arange(size), np.arange(size)).astype("<u2") * 8 + 100
+    ds.PixelData = np.stack([ramp + 20 * f for f in range(frames)]).tobytes()
+    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    return ds
+
+
+for label, target in (("rle", RLELossless),
+                      ("jpeg2000 lossless", JPEG2000Lossless)):
+    print(label)
+    src = smooth_multiframe(label.replace(" ", "_"))
+    expected = src.pixel_array.copy()
+    uncompressed = len(src.PixelData)
+    compress(src, target)
+    path = OUT / f"{label.replace(' ', '_')}.dcm"
+    src.save_as(path, enforce_file_format=True)
+    ds, arr = roundtrip(path)
+    check(ds.file_meta.TransferSyntaxUID == target, f"{label}: written as {target.name}")
+    box = arr[:, 32:96, 32:96]
+    check(int(box.max()) == 0, f"{label}: box blanked in every frame")
+    rest = arr.copy()
+    rest[:, 32:96, 32:96] = expected[:, 32:96, 32:96]
+    check(np.array_equal(rest, expected), f"{label}: samples outside the box bit-exact")
+    size = path.with_name(path.stem + "_out.dcm").stat().st_size
+    check(size < uncompressed * 0.75, f"{label}: output ({size} B) well below uncompressed ({uncompressed} B)")
+    check(ds.pixel_array.shape == expected.shape, f"{label}: frame count kept")
+
+print("jpeg2000 (lossy source)")
+src = smooth_multiframe("j2k_lossy")
+compress(src, JPEG2000, j2k_cr=[5])
+path = OUT / "j2k_lossy.dcm"
+src.save_as(path, enforce_file_format=True)
+ds, arr = roundtrip(path)
+check(ds.file_meta.TransferSyntaxUID == JPEG2000Lossless, "lossy JPEG 2000 comes back as JPEG 2000 Lossless")
+check(int(arr[:, 32:96, 32:96].max()) == 0, "j2k lossy: box blanked")
 
 print("palette color")
 ds = _base(32, 32, generate_uid(), 1, "palette")

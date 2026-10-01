@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 class UploadJob(QObject):
     """Runs one UploadRequest to completion on the thread it is moved to."""
 
-    progress = Signal(int, int, int, str)   # job_id, done, total, phase
+    progress = Signal(int, object, object, str)   # job_id, done, total, phase
     finished = Signal(int, object)          # job_id, UploadResult
     failed = Signal(int, str)               # job_id, message
     cancelled = Signal(int)
@@ -69,7 +69,7 @@ class UploadManager(QObject):
 
     queued = Signal(int)
     started = Signal(int)
-    progress = Signal(int, int, int, str)
+    progress = Signal(int, object, object, str)
     finished = Signal(int, object)
     failed = Signal(int, str)
     cancelled = Signal(int)

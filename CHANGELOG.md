@@ -2,7 +2,7 @@
 
 All notable changes to DicomPurge are documented in this file.
 
-## [Unreleased]
+## [0.2.0] - 2026-10-01
 
 ### Changed
 - Redacted files keep their compression: JPEG Baseline (re-encoded at quality 95, so one extra generation of loss), RLE Lossless and JPEG 2000 stay as they were; JPEG Lossless and JPEG-LS become JPEG 2000 Lossless. Formats with no encoder still fall back to uncompressed, with a warning. This stops compressed studies growing several-fold on export and in the XNAT zip.

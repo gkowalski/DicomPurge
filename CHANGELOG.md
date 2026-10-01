@@ -2,6 +2,15 @@
 
 All notable changes to DicomPurge are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Redacted files keep their compression: JPEG Baseline (re-encoded at quality 95, so one extra generation of loss), RLE Lossless and JPEG 2000 stay as they were; JPEG Lossless and JPEG-LS become JPEG 2000 Lossless. Formats with no encoder still fall back to uncompressed, with a warning. This stops compressed studies growing several-fold on export and in the XNAT zip.
+
+### Fixed
+- Uploading a study whose zip exceeds 2 GiB no longer breaks progress reporting (32-bit overflow in the progress signal and bar).
+- An unhandled error on a worker thread now shows its dialog on the GUI thread instead of crashing the app on macOS; `threading.excepthook` is routed through the same path.
+
 ## [0.1.0] - 2026-09-07
 
 ### Added

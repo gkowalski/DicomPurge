@@ -49,7 +49,7 @@ uv venv --python 3.12 && uv sync
 | `deid_app/xnat_upload_worker.py` | Upload jobs on their own threads and the queue that limits how many run at once |
 | `deid_app/xnat_pane.py` | XNAT server tab: project, study, session label, Upload, per-upload progress |
 | `deid_app/main_window.py` | Window assembly, tree, tabs, wiring |
-| `tests/` | Fixture generator, six headless GUI scripts, and two pytest-style unit modules |
+| `tests/` | Fixture generator, seven headless GUI scripts, and two pytest-style unit modules |
 
 ## Workflow
 
@@ -296,9 +296,11 @@ For every file in a series with boxes:
   (`(60xx,0015)`) are handled too. Overlays are redacted even though only `(7FE0,0010)` is
   shown in the UI.
 - **Compressed input (JPEG etc.)** — the frame cannot be edited in place, so the file is
-  decoded and rewritten as Explicit VR Little Endian. `YBR_*` data is normalised to `RGB`
-  (so that 0,0,0 really is black) and `PhotometricInterpretation` / `PlanarConfiguration`
-  are updated to match. This is logged per file. See
+  decoded, blanked, and re-encoded in its original format where an encoder exists
+  (see [Writing](#transfer-syntaxes) below); otherwise it is written as Explicit VR Little
+  Endian. `YBR_*` data is normalised to `RGB` while blanking (so that 0,0,0 really is
+  black) and `PhotometricInterpretation` / `PlanarConfiguration` are updated to match.
+  This is logged per file. See
   [Transfer syntaxes](#transfer-syntaxes) for what can be decoded.
 - **`PALETTE COLOR`** images are blanked with the darkest entry in their palette rather
   than index 0 (which is white in some palettes); the palette itself is kept.
@@ -334,11 +336,22 @@ Such files show as *Uneditable File*, cannot take boxes, and are copied through 
 on export (or withheld with *Skip files with no image data* — see
 [Files boxes cannot de-identify](#files-boxes-cannot-de-identify)).
 
-**Writing.** A redacted file is always written **uncompressed, as Explicit VR Little
-Endian**. Nothing is re-compressed: a JPEG 2000 or JPEG-LS study grows to its raw pixel
-size on export, and a lossy-compressed image becomes an uncompressed copy of its decoded
-pixels — no further generation loss from this point on. Files that were not redacted keep
-their original transfer syntax, since they are copied byte-for-byte.
+**Writing.** A redacted file keeps its compression where an encoder exists, so a
+compressed study does not balloon on export (a 1 GB multiframe study once became a
+14 GiB zip):
+
+| Original syntax | Written as |
+| --- | --- |
+| JPEG Baseline (8-bit) | JPEG Baseline, quality 95 (4:2:2, or 4:4:4 for `YBR_FULL` input). **Lossy**: adds one generation of loss; flagged in `(0028,2110)` / `(0028,2114)`. The quality is `JPEG_BASELINE_QUALITY` in `redaction.py`. |
+| RLE Lossless | RLE Lossless |
+| JPEG 2000, JPEG 2000 Lossless | JPEG 2000 Lossless (a lossy source takes no further loss) |
+| JPEG Lossless, JPEG-LS | JPEG 2000 Lossless (pixel-exact; no JPEG-LS encoder is installed) |
+| JPEG Extended (12-bit), HTJ2K, `PALETTE COLOR` JPEG, anything that fails to encode | Explicit VR Little Endian (uncompressed), with a logged warning |
+| Explicit VR Big Endian | Explicit VR Little Endian |
+
+Files that were not redacted keep their original transfer syntax, since they are
+copied byte-for-byte. The XNAT zip is stored, not deflated: already-compressed pixel
+data does not shrink.
 
 Note that the JPEG Lossless, JPEG Extended and JPEG-LS rows depend on
 `pylibjpeg-libjpeg`, which is GPL-3.0 — the reason DicomPurge is itself GPL-3.0 (see
@@ -354,7 +367,8 @@ with a tag-level de-identification step if you need PS3.15 Annex E conformance.
 ```bash
 uv run python tests/make_fixtures.py /tmp/fixtures   # synthetic mono / RGB multiframe / JPEG + overlays
 uv run python tests/test_redaction.py                # verifies pixels + overlay bits are zeroed
-uv run python tests/test_redaction_syntaxes.py       # big-endian, deflated, RLE and PALETTE COLOR input
+uv run python tests/test_redaction_syntaxes.py       # big-endian, deflated, RLE, JPEG 2000 (stays compressed) and PALETTE COLOR input
+QT_QPA_PLATFORM=offscreen uv run python tests/test_large_upload_progress.py  # >2 GiB progress, error dialog on the GUI thread
 QT_QPA_PLATFORM=offscreen uv run python tests/test_gui_smoke.py
 QT_QPA_PLATFORM=offscreen uv run python tests/test_metadata_pane.py
 QT_QPA_PLATFORM=offscreen uv run python tests/test_commit_shortcut.py

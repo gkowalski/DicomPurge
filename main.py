@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 import traceback
 
+from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from deid_app import APP_NAME
@@ -13,8 +15,32 @@ from deid_app.main_window import MainWindow
 from deid_app.resources import app_icon
 
 
+class _ErrorReporter(QObject):
+    """Shows the unhandled-error dialog on the GUI thread.
+
+    An exception can escape on a worker thread, and macOS aborts the process if
+    an NSWindow is created off the main thread. Emitting `show` from any thread
+    is queued by Qt onto the thread this object lives on.
+    """
+
+    show = Signal(str, str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.show.connect(self._show)
+
+    @Slot(str, str)
+    def _show(self, title: str, text: str) -> None:
+        QMessageBox.critical(None, title, text)
+
+
+_reporter: _ErrorReporter | None = None  # kept alive for the app lifetime
+
+
 def _install_excepthook() -> None:
+    global _reporter
     log = logging.getLogger("deid_app.unhandled")
+    reporter = _reporter = _ErrorReporter()
 
     def hook(exc_type, exc_value, exc_tb):
         if issubclass(exc_type, KeyboardInterrupt):
@@ -25,13 +51,17 @@ def _install_excepthook() -> None:
             "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
         )
         try:
-            QMessageBox.critical(
-                None, "Unexpected error", f"{exc_type.__name__}: {exc_value}"
-            )
+            reporter.show.emit("Unexpected error", f"{exc_type.__name__}: {exc_value}")
         except Exception:  # noqa: BLE001
             pass
 
+    def thread_hook(args):
+        if args.exc_type is SystemExit:
+            return
+        hook(args.exc_type, args.exc_value, args.exc_traceback)
+
     sys.excepthook = hook
+    threading.excepthook = thread_hook
 
 
 def main() -> int:
